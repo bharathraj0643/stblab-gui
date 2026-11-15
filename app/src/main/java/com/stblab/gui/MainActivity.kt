@@ -53,11 +53,15 @@ class MainActivity : Activity() {
     private var discoveryText = "Scan to find Android TV Remote devices on this network."
     private var hostField: EditText? = null
     private var codeField: EditText? = null
+    private var pairingDiscoveryLabel: TextView? = null
+    private var pairingDeviceList: LinearLayout? = null
+    private val pairingDeviceRows = linkedMapOf<String, Button>()
     private var selectedEditGenre = 0
     private var focusedArea = "channels"
     private var editFavorites = false
     private var jsonDraft = ""
     private var focusRestoreId = View.NO_ID
+    private var channelPageFocusPending = false
     private var pickerConnectionLabel: TextView? = null
     private var pickerTuneLabel: TextView? = null
     private var pickerPowerValue: TextView? = null
@@ -410,10 +414,10 @@ class MainActivity : Activity() {
             "CH ▼ / ▲  Next / previous channel",
             "OK (Enter)  Tune selected",
             "0–9  Direct dial (within 3s)",
-            "229  Recall previous channel",
-            "177  Open Favorites",
+            "🔔 Recall previous channel (Advanced keycode 229)",
+            "🔵 Airtel Specials: Open Favorites (Advanced keycode 177)",
             "170  Live TV",
-        ).forEach { hint -> hints.addView(label(hint, 13, DIM).apply { setPadding(0, dp(2), 0, dp(2)) }) }
+        ).forEach { hint -> hints.addView(label(hint, 11, DIM).apply { setPadding(0, dp(2), 0, dp(2)) }) }
         hints.addView(label("Use TVQuickActions to map the advanced remote keys.", 11, MUTED).apply {
             setPadding(0, dp(7), 0, 0)
         })
@@ -475,6 +479,9 @@ class MainActivity : Activity() {
         }
         row.addView(count, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, -1))
         row.onFocusChangeListener = View.OnFocusChangeListener { view, focused ->
+            if (focused && channelPageFocusPending) {
+                return@OnFocusChangeListener
+            }
             if (focused && index != genreIndex) {
                 activateGenre(index, keepGenreFocus = true)
                 return@OnFocusChangeListener
@@ -534,6 +541,10 @@ class MainActivity : Activity() {
         pickerGenreTitle?.text = currentGenre()?.name ?: "Channels"
         pickerCountLabel?.text = "${channels.size} ch"
         pickerPageLabel?.text = "Page ${pageIndex + 1} of $pageCount"
+        // Page changes replace the focused child, so hold channel scope while the
+        // new row views are created and restore focus after Android lays them out.
+        val restoreChannelFocus = focusedArea == "channels"
+        if (restoreChannelFocus) channelPageFocusPending = true
         list.removeAllViews()
         val start = pageIndex * PAGE_SIZE
         channels.drop(start).take(PAGE_SIZE).forEachIndexed { offset, channel ->
@@ -547,6 +558,21 @@ class MainActivity : Activity() {
         }
         updatePageArrow(pickerPrevArrow, pageCount > 1)
         updatePageArrow(pickerNextArrow, pageCount > 1)
+        if (restoreChannelFocus) {
+            val targetId = CHANNEL_ID_BASE + channelIndex
+            list.post { restoreChannelPageFocus(targetId) }
+        }
+    }
+
+    private fun restoreChannelPageFocus(targetId: Int, attempt: Int = 0) {
+        if (!channelPageFocusPending || focusRestoreId != targetId) return
+        if (findViewById<View>(targetId)?.requestFocus() == true) {
+            channelPageFocusPending = false
+        } else if (attempt < 4) {
+            main.postDelayed({ restoreChannelPageFocus(targetId, attempt + 1) }, 16)
+        } else {
+            channelPageFocusPending = false
+        }
     }
 
     private fun updatePageArrow(view: TextView?, enabled: Boolean) {
@@ -657,7 +683,7 @@ class MainActivity : Activity() {
         isFocusableInTouchMode = true
         minWidth = 0
         minHeight = dp(30)
-        textSize = 11f
+        textSize = 10f
         typeface = Typeface.MONOSPACE
         setPadding(dp(8), dp(4), dp(8), dp(4))
         setOnClickListener { action() }
@@ -670,7 +696,7 @@ class MainActivity : Activity() {
     }
 
     private fun keypadButton(text: String, idValue: Int, action: () -> Unit): Button = compactButton(text, idValue, action).apply {
-        textSize = if (idValue == KEYPAD_OK_ID) 13f else 15f
+        textSize = if (idValue == KEYPAD_OK_ID) 11f else 13f
         typeface = Typeface.MONOSPACE
         background = solidPanel(0xff1b2939.toInt(), 0xff44566d.toInt(), 1, dp(5))
         setTextColor(TEXT)
@@ -687,8 +713,10 @@ class MainActivity : Activity() {
     }
     private fun focusChannelAt(index: Int) {
         val id = CHANNEL_ID_BASE + index
+        focusedArea = "channels"
+        channelPageFocusPending = false
         focusRestoreId = id
-        main.post { findViewById<View>(id)?.requestFocus() }
+        findViewById<View>(id)?.requestFocus()
     }
 
     private fun makeChannelRow(channel: ChannelDto, index: Int): LinearLayout {
@@ -835,61 +863,56 @@ class MainActivity : Activity() {
     private fun handlePickerDpad(keyCode: Int): Boolean {
         val activeId = window.decorView.findFocus()?.id ?: View.NO_ID
         val genreCount = displayGenres().size
-        when {
-            activeId in GENRE_ID_BASE until GENRE_ID_BASE + genreCount -> when (keyCode) {
+        // Android focus can briefly land on an adjacent view while replacing a
+        // paged list. Route by the user's active pane, matching the reference's
+        // focused-column behavior rather than relying on geometric focus search.
+        when (focusedArea) {
+            "channels" -> when (keyCode) {
+                KeyEvent.KEYCODE_DPAD_UP -> { moveChannelSelection(-1); return true }
+                KeyEvent.KEYCODE_DPAD_DOWN -> { moveChannelSelection(1); return true }
+                KeyEvent.KEYCODE_DPAD_LEFT -> {
+                    channelPageFocusPending = false
+                    focusedArea = "genre"
+                    focusRestoreId = GENRE_ID_BASE + genreIndex
+                    findViewById<View>(focusRestoreId)?.requestFocus()
+                    return true
+                }
+                KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                    channelPageFocusPending = false
+                    focusedArea = "sidebar"
+                    focusRestoreId = KEYPAD_TOGGLE_ID
+                    findViewById<View>(focusRestoreId)?.requestFocus()
+                    return true
+                }
+            }
+            "genre" -> when (keyCode) {
                 KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN -> {
+                    if (genreCount == 0) return true
                     val delta = if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) 1 else -1
                     val next = (genreIndex + delta + genreCount) % genreCount
                     findViewById<View>(GENRE_ID_BASE + next)?.requestFocus()
                     return true
                 }
                 KeyEvent.KEYCODE_DPAD_RIGHT -> { focusChannelAt(channelIndex); return true }
+                KeyEvent.KEYCODE_DPAD_LEFT -> return true
             }
-            activeId in CHANNEL_ID_BASE until CHANNEL_ID_BASE + currentChannels().size -> when (keyCode) {
-                KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN -> {
-                    val count = currentChannels().size
-                    if (count == 0) return true
-                    val delta = if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) 1 else -1
-                    val next = (channelIndex + delta + count) % count
-                    focusedArea = "channels"
-                    val nextPage = next / PAGE_SIZE
-                    if (nextPage != pageIndex) {
-                        channelIndex = next
-                        pageIndex = nextPage
-                        selectedByGenre[currentGenre()?.id ?: 0] = next
-                        focusRestoreId = CHANNEL_ID_BASE + next
-                        refreshChannelRows()
-                        // Request focus synchronously: a posted request leaves a brief
-                        // no-focus window where the next remote repeat can escape to Genre.
-                        findViewById<View>(focusRestoreId)?.requestFocus()
-                    } else {
-                        focusRestoreId = CHANNEL_ID_BASE + next
-                        findViewById<View>(focusRestoreId)?.requestFocus()
+            "sidebar" -> when {
+                keypadOpen && activeId in KEYPAD_BUTTON_BASE..KEYPAD_OK_ID ->
+                    return moveKeypadFocus(activeId, keyCode)
+                activeId == KEYPAD_TOGGLE_ID -> when (keyCode) {
+                    KeyEvent.KEYCODE_DPAD_DOWN -> {
+                        findViewById<View>(if (keypadOpen) KEYPAD_BUTTON_BASE else SETTINGS_BUTTON_ID)?.requestFocus()
+                        return true
                     }
-                    return true
+                    KeyEvent.KEYCODE_DPAD_LEFT -> { focusChannelAt(channelIndex); return true }
                 }
-                KeyEvent.KEYCODE_DPAD_LEFT -> { findViewById<View>(GENRE_ID_BASE + genreIndex)?.requestFocus(); return true }
-                KeyEvent.KEYCODE_DPAD_RIGHT -> { focusRestoreId = KEYPAD_TOGGLE_ID; findViewById<View>(KEYPAD_TOGGLE_ID)?.requestFocus(); return true }
-            }
-            activeId == KEYPAD_TOGGLE_ID -> when (keyCode) {
-                KeyEvent.KEYCODE_DPAD_DOWN -> {
-                    findViewById<View>(if (keypadOpen) KEYPAD_BUTTON_BASE else SETTINGS_BUTTON_ID)?.requestFocus()
-                    return true
+                activeId == SETTINGS_BUTTON_ID -> when (keyCode) {
+                    KeyEvent.KEYCODE_DPAD_UP -> {
+                        findViewById<View>(if (keypadOpen) KEYPAD_OK_ID else KEYPAD_TOGGLE_ID)?.requestFocus()
+                        return true
+                    }
+                    KeyEvent.KEYCODE_DPAD_LEFT -> { focusChannelAt(channelIndex); return true }
                 }
-                KeyEvent.KEYCODE_DPAD_LEFT -> { focusChannelAt(channelIndex); return true }
-            }
-            activeId == SETTINGS_BUTTON_ID -> when (keyCode) {
-                KeyEvent.KEYCODE_DPAD_UP -> { findViewById<View>(if (keypadOpen) KEYPAD_OK_ID else KEYPAD_TOGGLE_ID)?.requestFocus(); return true }
-                KeyEvent.KEYCODE_DPAD_LEFT -> { focusChannelAt(channelIndex); return true }
-            }
-            keypadOpen && activeId in KEYPAD_BUTTON_BASE..KEYPAD_OK_ID -> return moveKeypadFocus(activeId, keyCode)
-        }
-        // Keep rapid repeated Up/Down presses inside Channels while a page swap is
-        // replacing the focused row or when Android temporarily reports no focused id.
-        if (focusedArea == "channels") {
-            when (keyCode) {
-                KeyEvent.KEYCODE_DPAD_UP -> { moveChannelSelection(-1); return true }
-                KeyEvent.KEYCODE_DPAD_DOWN -> { moveChannelSelection(1); return true }
             }
         }
         return false
@@ -907,8 +930,9 @@ class MainActivity : Activity() {
             pageIndex = nextPage
             selectedByGenre[currentGenre()?.id ?: 0] = next
             refreshChannelRows()
+        } else {
+            findViewById<View>(focusRestoreId)?.requestFocus()
         }
-        findViewById<View>(focusRestoreId)?.requestFocus()
     }
     private fun moveKeypadFocus(activeId: Int, keyCode: Int): Boolean {
         val targetId = when {
@@ -1029,8 +1053,11 @@ class MainActivity : Activity() {
         row.addView(button("PAIR WITH AIRTEL") { startPairing(host.text.toString()) }, weight(1f))
         row.addView(button("RECONNECT") { remote.connect(); renderSettings() }, weight(1f))
         root.addView(row)
-        root.addView(label(discoveryText, 15, MUTED))
-        boxes.forEach { box -> root.addView(button("${box.name} · ${box.ip}") { host.setText(box.ip); host.setSelection(host.text.length); discoveryText = "Selected ${box.name} at ${box.ip}. Choose PAIR WITH AIRTEL."; renderSettings() }) }
+        pairingDiscoveryLabel = label(discoveryText, 15, MUTED).also(root::addView)
+        pairingDeviceRows.clear()
+        pairingDeviceList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        root.addView(pairingDeviceList)
+        updatePairingDeviceRows()
         val statusLabel = label(when {
             snap.status == "waiting_code" -> snap.error ?: "Airtel box is showing a pairing code. Enter it below."
             snap.connected -> "Connected to ${snap.model ?: snap.host}${snap.currentApp?.let { " · $it" } ?: ""}"
@@ -1085,19 +1112,49 @@ class MainActivity : Activity() {
         }
     }
     private fun startPairing(host: String) {
-        try { remote.startPair(host); codeField?.requestFocus(); showKeyboard(codeField); showMessage("Pairing started. Enter the code shown on the Airtel box.") }
+        try {
+            remote.startPair(host)
+            val field = codeField
+            field?.post { field.requestFocus(); showKeyboard(field) }
+            showMessage("Pairing started. Enter the code shown on the Airtel box.")
+        }
         catch (e: Throwable) { showMessage(e.message ?: "Could not start pairing") }
     }
     private fun discoverBoxes() {
         if (activeDiscovery != null) return
-        boxes = emptyList(); discoveryText = "Searching with mDNS and local network scan…"; renderSettings()
+        boxes = emptyList()
+        discoveryText = "Searching with mDNS and local network scan…"
+        pairingDiscoveryLabel?.text = discoveryText
+        updatePairingDeviceRows()
         val scan = Discovery(this) { results, done -> main.post {
             boxes = results.take(12)
             discoveryText = when { done && results.isEmpty() -> "No boxes found. Check same Wi-Fi/LAN or enter an IP manually."; done -> "Found ${results.size} device(s). Select one or enter an IP manually."; else -> "Searching…" }
-            renderSettings()
+            pairingDiscoveryLabel?.text = discoveryText
+            updatePairingDeviceRows()
         } }
         activeDiscovery = scan
         io.execute { scan.start(); activeDiscovery = null }
+    }
+
+    private fun updatePairingDeviceRows() {
+        val container = pairingDeviceList ?: return
+        val visibleIps = boxes.map { it.ip }.toSet()
+        pairingDeviceRows.keys.filterNot { it in visibleIps }.toList().forEach { ip ->
+            container.removeView(pairingDeviceRows.remove(ip))
+        }
+        boxes.forEach { box ->
+            if (pairingDeviceRows.containsKey(box.ip)) return@forEach
+            val row = button("${box.name} · ${box.ip}") {
+                hostField?.let { field ->
+                    field.setText(box.ip)
+                    field.setSelection(field.text.length)
+                }
+                discoveryText = "Selected ${box.name} at ${box.ip}. Choose PAIR WITH AIRTEL."
+                pairingDiscoveryLabel?.text = discoveryText
+            }
+            pairingDeviceRows[box.ip] = row
+            container.addView(row)
+        }
     }
 
     private fun editPage(root: LinearLayout) {
@@ -1184,7 +1241,7 @@ class MainActivity : Activity() {
         actions.addView(button("EXPORT CURRENT JSON") { createJsonDocument() })
         actions.addView(button("CHOOSE JSON FILE") { openJsonDocument() })
         root.addView(actions)
-        val editor = EditText(this).apply { setText(jsonDraft); gravity = Gravity.TOP or Gravity.START; minLines = 12; setTextColor(WHITE); setHintTextColor(MUTED); hint = "Paste or edit JSON. Expected version 1 with genres."; setBackground(panel(false)) }
+        val editor = EditText(this).apply { setText(jsonDraft); textSize = 14f; gravity = Gravity.TOP or Gravity.START; minLines = 12; setTextColor(WHITE); setHintTextColor(MUTED); hint = "Paste or edit JSON. Expected version 1 with genres."; setBackground(panel(false)) }
         root.addView(editor, LinearLayout.LayoutParams(-1, dp(300)))
         root.addView(button("APPLY JSON") {
             jsonDraft = editor.text.toString()
@@ -1247,14 +1304,14 @@ class MainActivity : Activity() {
     private fun showKeyboard(field: EditText?) { field?.post { (getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)?.showSoftInput(field, InputMethodManager.SHOW_IMPLICIT) } }
     private fun numberField(hintValue: String, value: Int?): EditText = editField(hintValue, value?.toString() ?: "").apply { inputType = android.text.InputType.TYPE_CLASS_NUMBER }
     private fun editField(hintValue: String, value: String): EditText = EditText(this).apply {
-        hint = hintValue; setText(value); setTextColor(TEXT); setHintTextColor(MUTED); setSingleLine(true); setBackground(panel(false)); setPadding(dp(12), dp(8), dp(12), dp(8))
+        hint = hintValue; setText(value); textSize = 14f; setTextColor(TEXT); setHintTextColor(MUTED); setSingleLine(true); setBackground(panel(false)); setPadding(dp(12), dp(8), dp(12), dp(8))
         onFocusChangeListener = View.OnFocusChangeListener { view, focused -> view.background = panel(focused); if (focused) view.elevation = dp(4).toFloat() else view.elevation = 0f }
     }
     private fun label(value: String, size: Int, color: Int = WHITE, bold: Boolean = false): TextView = TextView(this).apply {
-        text = value; textSize = size.toFloat(); setTextColor(color); setPadding(dp(10), dp(8), dp(10), dp(8)); if (bold) setTypeface(typeface, Typeface.BOLD)
+        text = value; textSize = size * 0.88f; setTextColor(color); setPadding(dp(10), dp(8), dp(10), dp(8)); if (bold) setTypeface(typeface, Typeface.BOLD)
     }
     private fun button(value: String, action: () -> Unit): Button = Button(this).apply {
-        text = value; isAllCaps = false; isFocusable = true; isFocusableInTouchMode = true; setTextColor(TEXT); textSize = 15f
+        text = value; isAllCaps = false; isFocusable = true; isFocusableInTouchMode = true; setTextColor(TEXT); textSize = 13f
         setPadding(dp(12), dp(7), dp(12), dp(7)); background = panel(false)
         onFocusChangeListener = View.OnFocusChangeListener { view, focused ->
             if (focused && view.id != View.NO_ID) {
