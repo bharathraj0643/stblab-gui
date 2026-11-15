@@ -192,7 +192,7 @@ class MainActivity : Activity() {
         val start = pageIndex * PAGE_SIZE
         channels.drop(start).take(PAGE_SIZE).forEachIndexed { offset, ch ->
             val absolute = start + offset
-            val row = button("${ch.dummyNumber.toString().padStart(3, ' ')}    ${ch.name}    → ${ch.redirectNumber}").apply { id = CHANNEL_ID_BASE + absolute }
+            val row = button("${ch.dummyNumber.toString().padStart(3, ' ')}    ${ch.name}    → ${ch.redirectNumber}") {}.apply { id = CHANNEL_ID_BASE + absolute }
             row.onFocusChangeListener = View.OnFocusChangeListener { _, focused ->
                 row.setBackground(panel(focused || absolute == channelIndex))
                 row.setTextColor(if (focused || absolute == channelIndex) Color.rgb(16, 24, 39) else WHITE)
