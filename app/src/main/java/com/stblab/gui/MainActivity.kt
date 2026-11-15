@@ -11,18 +11,16 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.os.Process
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
 import android.widget.*
-import androidx.core.content.ContextCompat
 import com.xstream.remote.RemoteV2Client
 import java.util.concurrent.Executors
 
-/** Native Android TV UI. This Activity is deliberately independent of the hosted web assets. */
+/** Native Android TV UI. */
 class MainActivity : Activity() {
     private lateinit var remote: RemoteV2Client
     private lateinit var store: ChannelStore
@@ -57,7 +55,6 @@ class MainActivity : Activity() {
     private var pickerTelemetryLabel: TextView? = null
     private var pickerTuneLabel: TextView? = null
     private var settingsRemoteLabel: TextView? = null
-    private var settingsServerLabel: TextView? = null
     private var pairingStatusLabel: TextView? = null
     private val poll = object : Runnable {
         override fun run() {
@@ -73,7 +70,6 @@ class MainActivity : Activity() {
         window.decorView.setBackgroundColor(BG)
         remote = RemoteV2Client.get(this)
         store = ChannelStore(this)
-        startHost()
         reloadGenres()
         renderPicker()
         main.postDelayed(poll, 3000)
@@ -109,10 +105,6 @@ class MainActivity : Activity() {
         }
         if (keyCode in KeyEvent.KEYCODE_DPAD_UP..KeyEvent.KEYCODE_DPAD_RIGHT && handlePickerDpad(keyCode)) return true
         return super.onKeyDown(keyCode, event)
-    }
-
-    private fun startHost(retry: Boolean = false) {
-        ContextCompat.startForegroundService(this, Intent(this, HostService::class.java).setAction(if (retry) HostService.ACTION_RETRY else HostService.ACTION_START))
     }
 
     private fun reloadGenres() {
@@ -158,11 +150,12 @@ class MainActivity : Activity() {
         dg.forEachIndexed { i, genre ->
             val item = button("${genre.name}   ${genre.channels.size}") { jumpGenre(i); focusChannelAt(channelIndex) }.apply { id = GENRE_ID_BASE + i }
             item.gravity = Gravity.CENTER_VERTICAL or Gravity.START
-            item.setBackground(panel(i == genreIndex))
+            item.setBackground(panel(i == genreIndex, GENRE_SURFACE))
             item.isSelected = i == genreIndex
+            item.setTextColor(if (i == genreIndex) Color.BLACK else DIM)
             item.onFocusChangeListener = View.OnFocusChangeListener { _, focused ->
-                item.setBackground(panel(focused || i == genreIndex))
-                item.setTextColor(if (focused || i == genreIndex) Color.rgb(16, 24, 39) else WHITE)
+                item.setBackground(panel(focused || i == genreIndex, GENRE_SURFACE))
+                item.setTextColor(if (focused || i == genreIndex) Color.BLACK else DIM)
                 if (focused) {
                     focusRestoreId = GENRE_ID_BASE + i
                     focusedArea = "genre"
@@ -194,13 +187,14 @@ class MainActivity : Activity() {
             val absolute = start + offset
             val row = button("${ch.dummyNumber.toString().padStart(3, ' ')}    ${ch.name}    → ${ch.redirectNumber}") {}.apply { id = CHANNEL_ID_BASE + absolute }
             row.onFocusChangeListener = View.OnFocusChangeListener { _, focused ->
-                row.setBackground(panel(focused || absolute == channelIndex))
-                row.setTextColor(if (focused || absolute == channelIndex) Color.rgb(16, 24, 39) else WHITE)
+                row.setBackground(panel(focused || absolute == channelIndex, CHANNEL_SURFACE))
+                row.setTextColor(if (focused || absolute == channelIndex) Color.BLACK else TEXT)
                 if (focused) { focusedArea = "channels"; channelIndex = absolute; selectedByGenre[currentGenre()?.id ?: 0] = absolute; pageIndex = absolute / PAGE_SIZE; focusRestoreId = CHANNEL_ID_BASE + absolute }
             }
             row.setOnClickListener { channelIndex = absolute; selectedByGenre[currentGenre()?.id ?: 0] = absolute; tune(ch) }
             row.gravity = Gravity.CENTER_VERTICAL or Gravity.START
-            row.setBackground(panel(absolute == channelIndex))
+            row.setBackground(panel(absolute == channelIndex, CHANNEL_SURFACE))
+            row.setTextColor(if (absolute == channelIndex) Color.BLACK else TEXT)
             row.contentDescription = "${ch.name}, channel ${ch.dummyNumber}. Press OK to tune."
             channelColumn.addView(row)
         }
@@ -215,7 +209,7 @@ class MainActivity : Activity() {
             appendLine("APP      ${state.currentApp?.substringAfterLast('.') ?: "TV Home"}")
             appendLine("TUNED    ${lastTuned.ifBlank { "—" }}")
         }
-        val telemetryLabel = label(telemetry, 15, WHITE)
+        val telemetryLabel = label(telemetry, 15, TEXT).apply { setBackground(panel(false, 0xff03061e.toInt())) }
         pickerTelemetryLabel = telemetryLabel
         side.addView(telemetryLabel)
         side.addView(button(if (keypadOpen) "HIDE NUMPAD" else "🔢  NUMPAD") { focusRestoreId = KEYPAD_TOGGLE_ID; keypadOpen = !keypadOpen; renderPicker() }.apply { id = KEYPAD_TOGGLE_ID })
@@ -238,7 +232,7 @@ class MainActivity : Activity() {
             side.addView(button("OK · TUNE") { if (dial.isNotEmpty()) resolveDial() else chosen?.let(::tune) }.apply { id = KEYPAD_OK_ID })
         }
         if (dial.isNotEmpty()) side.addView(label("DIRECT DIAL  #$dial\n${findDial(dial)?.name ?: "Channel not found"}", 17, AMBER, true))
-        val tuneLabel = label(tuningStatus, 15, AMBER).apply { visibility = if (tuningStatus.isBlank()) View.GONE else View.VISIBLE }
+        val tuneLabel = label(tuningStatus, 15, FOCUS).apply { setBackground(panel(false, 0xff132a36.toInt())); visibility = if (tuningStatus.isBlank()) View.GONE else View.VISIBLE }
         pickerTuneLabel = tuneLabel
         side.addView(tuneLabel)
         side.addView(label("◀ / ▶: move between lists\n▲ / ▼: focused list\nCH ▲ / ▼: channel step\nOK: tune · 0–9: direct dial\n229: Recall · 177: Favorites", 13, MUTED))
@@ -419,11 +413,10 @@ class MainActivity : Activity() {
             if (page == "settings") { page = "picker"; renderPicker() }
             else { page = "settings"; renderSettings() }
         })
-        header.addView(label(if (page == "settings") "Settings" else when (page) { "server" -> "Server"; "pairing" -> "Airtel box pairing"; "remote" -> "Remote Controls"; "edit" -> "Edit Channels & Genres"; "json" -> "Channel JSON"; else -> "Help & About" }, 27, WHITE, true), weight(1f))
+        header.addView(label(if (page == "settings") "Settings" else when (page) { "pairing" -> "Airtel box pairing"; "remote" -> "Remote Controls"; "edit" -> "Edit Channels & Genres"; "json" -> "Channel JSON"; else -> "Help & About" }, 27, WHITE, true), weight(1f))
         root.addView(header)
         when (page) {
             "settings" -> settingsHome(root)
-            "server" -> serverPage(root)
             "pairing" -> pairingPage(root)
             "remote" -> remotePage(root)
             "edit" -> editPage(root)
@@ -439,10 +432,6 @@ class MainActivity : Activity() {
         val remoteLabel = label("Remote ${if (state.connected) "Connected to ${state.model ?: state.host}" else state.status + (state.error?.let { " · $it" } ?: "")}", 18, if (state.connected) GREEN else AMBER)
         settingsRemoteLabel = remoteLabel
         root.addView(remoteLabel)
-        val serverLabel = label("Server ${if (HostService.running) "LIVE · ${lanAddress()}:${HostService.PORT}" else "OFFLINE"}", 18, if (HostService.running) GREEN else AMBER)
-        settingsServerLabel = serverLabel
-        root.addView(serverLabel)
-        root.addView(button("SERVER STATUS & CONTROLS") { page = "server"; renderSettings() })
         root.addView(button("AIRTEL BOX PAIRING & CONNECTION") { page = "pairing"; renderSettings() })
         root.addView(button("REMOTE CONTROLS") { page = "remote"; renderSettings() })
         root.addView(button("REMOTE TEXT INPUT: ${if (remote.remoteTextInputEnabled) "ON" else "OFF · GAMEPAD SAFE"}") { remote.setRemoteTextInputEnabled(!remote.remoteTextInputEnabled); renderSettings() })
@@ -450,21 +439,6 @@ class MainActivity : Activity() {
         root.addView(button("EDIT CHANNELS & GENRES") { selectedEditGenre = 0; editFavorites = false; page = "edit"; renderSettings() })
         root.addView(button("CHANNEL JSON · IMPORT / EXPORT") { page = "json"; renderSettings() })
         root.addView(button("HELP & ABOUT") { page = "help"; renderSettings() })
-    }
-
-    private fun serverPage(root: LinearLayout) {
-        val state = when { HostService.running -> "● SERVER LIVE · PORT ${HostService.PORT}"; HostService.error != null -> "● SERVER OFFLINE · RETRYING"; else -> "● SERVER STARTING" }
-        val serverLabel = label(state, 22, if (HostService.running) GREEN else AMBER, true)
-        settingsServerLabel = serverLabel
-        root.addView(serverLabel)
-        root.addView(label(if (HostService.running) "http://${lanAddress()}:${HostService.PORT}" else "Network: ${lanAddress()}", 22, GREEN))
-        HostService.error?.let { root.addView(label("Error: $it", 16, AMBER)) }
-        root.addView(label("The LAN server serves the optional browser picker and API to other devices. The Android Picker is native and does not load this page.", 16, MUTED))
-        root.addView(button("RETRY SERVER") { startHost(retry = true); renderSettings() })
-        root.addView(button("STOP SERVER & EXIT") {
-            stopService(Intent(this, HostService::class.java)); finishAndRemoveTask()
-            main.postDelayed({ Process.killProcess(Process.myPid()) }, 500)
-        })
     }
 
     private fun pairingPage(root: LinearLayout) {
@@ -586,8 +560,8 @@ class MainActivity : Activity() {
         }
     }
     private fun genreForm(item: GenreDto?) {
-        val name = EditText(this).apply { hint = "Genre name"; setText(item?.name ?: "") }
-        val order = EditText(this).apply { hint = "Order (1 = top)"; inputType = android.text.InputType.TYPE_CLASS_NUMBER; setText(item?.sortOrder?.takeIf { it > 0 }?.toString() ?: if (item == null) (genres.size + 1).toString() else "") }
+        val name = editField("Genre name", item?.name ?: "")
+        val order = numberField("Order (1 = top)", item?.sortOrder?.takeIf { it > 0 } ?: if (item == null) genres.size + 1 else null)
         val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(18), 0, dp(18), 0); addView(name); addView(order) }
         AlertDialog.Builder(this).setTitle(if (item == null) "Add Genre" else "Edit Genre").setView(box)
             .setNegativeButton("Cancel", null).setPositiveButton(if (item == null) "Save" else "Update") { _, _ ->
@@ -596,7 +570,7 @@ class MainActivity : Activity() {
             }.show()
     }
     private fun channelForm(genreId: Int, item: ChannelDto?) {
-        val name = EditText(this).apply { hint = "Channel name"; setText(item?.name ?: "") }
+        val name = editField("Channel name", item?.name ?: "")
         val dummy = numberField("Dummy display number", item?.dummyNumber)
         val redirect = numberField("Redirect STB number", item?.redirectNumber)
         val order = numberField("Sort order", item?.sortOrder ?: (genres.firstOrNull { it.id == genreId }?.channels?.size?.plus(1) ?: 1))
@@ -662,7 +636,7 @@ class MainActivity : Activity() {
         root.addView(label("PICKER NAVIGATION", 16, GREEN, true))
         root.addView(label("◀ / ▶ Move between genre and channel areas\n▲ / ▼ Move through the focused list or keypad\nCH ▼ / ▲ Next / previous channel\nOK / Enter Tune selected\n0–9 Direct dial (up to 3 digits)\nRemote key 229 Recall previous channel\nRemote key 177 Open Favorites", 18, WHITE))
         root.addView(label("Android TV Remote v2 currently sends short key presses only. Remote text input is optional and may conflict with third-party keyboard services.", 15, MUTED))
-        root.addView(label("StbLab · LAN host port ${HostService.PORT}\n${if (HostService.running) "http://${lanAddress()}:${HostService.PORT}" else "Server offline"}", 16, GREEN))
+        root.addView(label("StbLab · Native Android TV app", 16, GREEN))
     }
 
     private fun refreshStatusViews() {
@@ -681,10 +655,6 @@ class MainActivity : Activity() {
             it.text = "Remote ${if (state.connected) "Connected to ${state.model ?: state.host}" else state.status + (state.error?.let { message -> " · $message" } ?: "")}"
             it.setTextColor(if (state.connected) GREEN else AMBER)
         }
-        settingsServerLabel?.let {
-            it.text = if (HostService.running) "● SERVER LIVE · ${lanAddress()}:${HostService.PORT}" else "● SERVER OFFLINE${HostService.error?.let { message -> " · $message" } ?: ""}"
-            it.setTextColor(if (HostService.running) GREEN else AMBER)
-        }
         pairingStatusLabel?.let {
             it.text = when {
                 state.status == "waiting_code" -> state.error ?: "Airtel box is showing a pairing code. Enter it below."
@@ -699,25 +669,33 @@ class MainActivity : Activity() {
     private fun confirm(message: String, action: () -> Unit) { AlertDialog.Builder(this).setMessage(message).setNegativeButton("Cancel", null).setPositiveButton("Confirm") { _, _ -> action() }.show() }
     private fun showMessage(message: String) { Toast.makeText(this, message, Toast.LENGTH_LONG).show() }
     private fun showKeyboard(field: EditText?) { field?.post { (getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)?.showSoftInput(field, InputMethodManager.SHOW_IMPLICIT) } }
-    private fun numberField(hintValue: String, value: Int?): EditText = EditText(this).apply { hint = hintValue; inputType = android.text.InputType.TYPE_CLASS_NUMBER; value?.let { setText(it.toString()) } }
-    private fun editField(hintValue: String, value: String): EditText = EditText(this).apply { hint = hintValue; setText(value); setTextColor(WHITE); setHintTextColor(MUTED); setSingleLine(true); setBackground(panel(false)); setPadding(dp(12), dp(8), dp(12), dp(8)) }
-    private fun column(title: String, ignored: Float): LinearLayout = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(4), dp(4), dp(4), dp(4)); addView(label(title, 15, GREEN, true)) }
+    private fun numberField(hintValue: String, value: Int?): EditText = editField(hintValue, value?.toString() ?: "").apply { inputType = android.text.InputType.TYPE_CLASS_NUMBER }
+    private fun editField(hintValue: String, value: String): EditText = EditText(this).apply {
+        hint = hintValue; setText(value); setTextColor(TEXT); setHintTextColor(MUTED); setSingleLine(true); setBackground(panel(false)); setPadding(dp(12), dp(8), dp(12), dp(8))
+        onFocusChangeListener = View.OnFocusChangeListener { view, focused -> view.background = panel(focused); if (focused) view.elevation = dp(4).toFloat() else view.elevation = 0f }
+    }
+    private fun column(title: String, ignored: Float): LinearLayout = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(4), dp(4), dp(4), dp(4)); addView(label(title, 15, ACCENT, true)) }
     private fun label(value: String, size: Int, color: Int = WHITE, bold: Boolean = false): TextView = TextView(this).apply {
         text = value; textSize = size.toFloat(); setTextColor(color); setPadding(dp(10), dp(8), dp(10), dp(8)); if (bold) setTypeface(typeface, Typeface.BOLD)
     }
     private fun button(value: String, action: () -> Unit): Button = Button(this).apply {
-        text = value; isAllCaps = false; isFocusable = true; isFocusableInTouchMode = true; setTextColor(WHITE); textSize = 15f
+        text = value; isAllCaps = false; isFocusable = true; isFocusableInTouchMode = true; setTextColor(TEXT); textSize = 15f
         setPadding(dp(12), dp(7), dp(12), dp(7)); background = panel(false)
         onFocusChangeListener = View.OnFocusChangeListener { view, focused ->
             if (focused && view.id != View.NO_ID) focusRestoreId = view.id
             view.background = panel(focused || isSelected)
-            (view as? Button)?.setTextColor(if (focused || isSelected) Color.rgb(16, 24, 39) else WHITE)
+            (view as? Button)?.setTextColor(if (focused || isSelected) Color.BLACK else TEXT)
+            view.elevation = if (focused) dp(5).toFloat() else 0f
         }
         setOnClickListener { action() }
     }
-    private fun panel(active: Boolean): GradientDrawable = GradientDrawable().apply {
-        cornerRadius = dp(8).toFloat(); setColor(if (active) FOCUS else SURFACE)
-        setStroke(dp(if (active) 3 else 1), if (active) WHITE else BORDER)
+    private fun panel(active: Boolean, idleColor: Int = SURFACE): GradientDrawable = GradientDrawable().apply {
+        cornerRadius = dp(5).toFloat()
+        if (active) {
+            orientation = GradientDrawable.Orientation.TOP_BOTTOM
+            colors = intArrayOf(0xff2fc2ff.toInt(), 0xff0ea5f7.toInt(), 0xff0089e5.toInt())
+        } else setColor(idleColor)
+        setStroke(dp(if (active) 2 else 1), if (active) 0xffd4e4f0.toInt() else BORDER)
     }
     private fun weight(w: Float): LinearLayout.LayoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, w)
     private fun dp(n: Int): Int = (resources.displayMetrics.density * n).toInt()
@@ -732,13 +710,18 @@ class MainActivity : Activity() {
         private const val KEYPAD_FAVORITES_ID = 31020
         private const val KEYPAD_RECALL_ID = 31021
         private const val KEYPAD_OK_ID = 31022
-        private val BG = 0xff0b1020.toInt()
-        private val SURFACE = 0xff1a2941.toInt()
-        private val BORDER = 0xff7185a3.toInt()
-        private val FOCUS = 0xffffc928.toInt()
-        private val GREEN = 0xff27d7a1.toInt()
-        private val AMBER = 0xffffcc66.toInt()
-        private val MUTED = 0xffaab4cf.toInt()
-        private val WHITE = -1
+        private val BG = 0xff14151c.toInt()
+        private val GENRE_SURFACE = 0xff142238.toInt()
+        private val CHANNEL_SURFACE = 0xff17263a.toInt()
+        private val SURFACE = 0xff1b2939.toInt()
+        private val BORDER = 0xff44566d.toInt()
+        private val FOCUS = 0xff32b8ff.toInt()
+        private val ACCENT = 0xff159feb.toInt()
+        private val GREEN = 0xff4ac26b.toInt()
+        private val AMBER = 0xffff5252.toInt()
+        private val TEXT = 0xfff5f7ff.toInt()
+        private val DIM = 0xffd7deef.toInt()
+        private val MUTED = 0xffbdc9e0.toInt()
+        private val WHITE = 0xfff5f7ff.toInt()
     }
 }
