@@ -59,8 +59,11 @@ class MainActivity : Activity() {
     private var jsonDraft = ""
     private var focusRestoreId = View.NO_ID
     private var pickerConnectionLabel: TextView? = null
-    private var pickerTelemetryLabel: TextView? = null
     private var pickerTuneLabel: TextView? = null
+    private var pickerPowerValue: TextView? = null
+    private var pickerVolumeValue: TextView? = null
+    private var pickerAppValue: TextView? = null
+    private var pickerTunedValue: TextView? = null
     private var settingsRemoteLabel: TextView? = null
     private var pairingStatusLabel: TextView? = null
     private val poll = object : Runnable {
@@ -74,12 +77,30 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        hideSystemChrome()
         window.decorView.setBackgroundColor(BG)
         remote = RemoteV2Client.get(this)
         store = ChannelStore(this)
         reloadGenres()
         renderPicker()
         main.postDelayed(poll, 3000)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun hideSystemChrome() {
+        window.decorView.systemUiVisibility = (
+            View.SYSTEM_UI_FLAG_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+            )
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) hideSystemChrome()
     }
 
     override fun onResume() { super.onResume(); if (::remote.isInitialized) { if (page == "picker") renderPicker() else renderSettings() } }
@@ -94,9 +115,20 @@ class MainActivity : Activity() {
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (page == "picker" && event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
-            val pressedDigit = digitFor(event)
-            if (pressedDigit != null) { digit(pressedDigit); return true }
+        if (page == "picker" && event.action == KeyEvent.ACTION_DOWN) {
+            val isChannelStep = event.keyCode == KeyEvent.KEYCODE_CHANNEL_UP || event.keyCode == KeyEvent.KEYCODE_PAGE_UP ||
+                event.keyCode == KeyEvent.KEYCODE_CHANNEL_DOWN || event.keyCode == KeyEvent.KEYCODE_PAGE_DOWN
+            if (!isChannelStep && channelStepTask != null) {
+                tuningStatus = ""
+                channelStepTask?.let(main::removeCallbacks)
+                channelStepTask = null
+                pickerTuneLabel?.visibility = View.GONE
+            }
+            if (event.repeatCount == 0) {
+                val pressedDigit = digitFor(event)
+                if (pressedDigit != null) { digit(pressedDigit); return true }
+            }
+            if (event.keyCode in KeyEvent.KEYCODE_DPAD_UP..KeyEvent.KEYCODE_DPAD_RIGHT && handlePickerDpad(event.keyCode)) return true
         }
         return super.dispatchKeyEvent(event)
     }
@@ -155,118 +187,435 @@ class MainActivity : Activity() {
     private fun renderPicker() {
         if (!::store.isInitialized || page != "picker") return
         reloadGenres()
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(28), dp(18), dp(28), dp(18)); isFocusable = true }
-        val header = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; orientation = LinearLayout.HORIZONTAL }
-        header.addView(label("StbLab Picker", 27, WHITE, true), weight(1f))
-        val state = remote.snapshot()
-        val connectionLabel = label(if (state.connected) "● LIVE" else "● OFFLINE", 15, if (state.connected) GREEN else AMBER, true)
-        pickerConnectionLabel = connectionLabel
-        header.addView(connectionLabel)
-        header.addView(button("⚙  SETTINGS") { focusRestoreId = SETTINGS_BUTTON_ID; page = "settings"; renderSettings() }.apply { id = SETTINGS_BUTTON_ID })
-        root.addView(header)
-
-        val body = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; layoutParams = LinearLayout.LayoutParams(-1, 0, 1f) }
-        val genreColumn = column("GENRE", 0.23f)
-        val genreList = fixedRows()
-        val dg = displayGenres()
-        dg.forEachIndexed { i, genre ->
-            val item = button("${genre.name}   ${genre.channels.size}") { jumpGenre(i); focusChannelAt(channelIndex) }.apply { id = GENRE_ID_BASE + i }
-            item.gravity = Gravity.CENTER_VERTICAL or Gravity.START
-            item.setBackground(pickerPanel(i == genreIndex, GENRE_SURFACE))
-            item.isSelected = i == genreIndex
-            item.setTextColor(if (i == genreIndex) Color.BLACK else DIM)
-            item.onFocusChangeListener = View.OnFocusChangeListener { _, focused ->
-                item.setBackground(pickerPanel(focused || i == genreIndex, GENRE_SURFACE, focused))
-                item.setTextColor(if (focused || i == genreIndex) Color.BLACK else DIM)
-                item.elevation = if (focused) dp(10).toFloat() else 0f
-                item.scaleX = if (focused) 1.015f else 1f
-                item.scaleY = if (focused) 1.015f else 1f
-                if (focused) {
-                    focusRestoreId = GENRE_ID_BASE + i
-                    focusedArea = "genre"
-                    if (genreIndex != i) {
-                        val oldId = currentGenre()?.id
-                        if (oldId != null) selectedByGenre[oldId] = channelIndex
-                        genreIndex = i
-                        channelIndex = selectedByGenre[currentGenre()?.id] ?: 0
-                        channelIndex = channelIndex.coerceIn(0, (currentChannels().size - 1).coerceAtLeast(0))
-                        pageIndex = channelIndex / PAGE_SIZE
-                        renderPicker()
-                    }
-                }
-            }
-            genreList.addView(item, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, -1))
+        pickerTuneLabel = null
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setBackgroundColor(BG)
+            clipChildren = false
+            clipToPadding = false
         }
-        genreColumn.addView(genreList, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
-        body.addView(genreColumn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 0.23f))
 
-        val channelColumn = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(10), 0, dp(10), 0) }
+        // The guide occupies 75% of the screen; the utility sidebar occupies 25%.
+        val guide = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setBackgroundColor(0xbd02051a.toInt())
+            clipChildren = false
+            clipToPadding = false
+        }
+
+        val genreColumn = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(0xbd02051a.toInt())
+        }
+        val genreHeader = label("GENRE", 24, ACCENT, true).apply {
+            gravity = Gravity.CENTER
+            letterSpacing = 0.1f
+            setPadding(dp(20), dp(16), dp(20), dp(16))
+            setBackgroundColor(0xb302051c.toInt())
+        }
+        genreColumn.addView(genreHeader, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))
+        val genreList = fixedRows().apply { setPadding(dp(8), dp(5), dp(8), dp(5)) }
+        val visibleGenres = displayGenres()
+        visibleGenres.forEachIndexed { index, genre ->
+            genreList.addView(makeGenreRow(genre, index), LinearLayout.LayoutParams(-1, -1))
+        }
+        genreColumn.addView(genreList, LinearLayout.LayoutParams(-1, 0, 1f))
+        guide.addView(genreColumn, LinearLayout.LayoutParams(0, -1, 0.32f))
+
+        guide.addView(View(this).apply { setBackgroundColor(0x8cdcefff.toInt()) }, LinearLayout.LayoutParams(dp(1), -1))
+
+        val channelColumn = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(0xbd02051a.toInt())
+        }
         val channels = currentChannels()
-        val chunks = ((channels.size + PAGE_SIZE - 1) / PAGE_SIZE).coerceAtLeast(1)
-        val pageRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-        pageRow.addView(button("◀  PREV") { if (chunks > 1) { pageIndex = (pageIndex - 1 + chunks) % chunks; channelIndex = pageIndex * PAGE_SIZE; renderPicker(); focusChannelAt(channelIndex) } }.apply { isFocusable = false; isFocusableInTouchMode = false })
-        pageRow.addView(label("Page ${pageIndex + 1} of $chunks  ·  ${currentGenre()?.name ?: "Channels"} · ${channels.size} ch", 16, MUTED, true), weight(1f))
-        pageRow.addView(button("NEXT  ▶") { if (chunks > 1) { pageIndex = (pageIndex + 1) % chunks; channelIndex = pageIndex * PAGE_SIZE; renderPicker(); focusChannelAt(channelIndex) } }.apply { isFocusable = false; isFocusableInTouchMode = false })
-        channelColumn.addView(pageRow)
-        val channelList = fixedRows()
-        val start = pageIndex * PAGE_SIZE
-        channels.drop(start).take(PAGE_SIZE).forEachIndexed { offset, ch ->
-            val absolute = start + offset
-            val row = makeChannelRow(ch, absolute)
-            channelList.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, -1))
+        val pageCount = ((channels.size + PAGE_SIZE - 1) / PAGE_SIZE).coerceAtLeast(1)
+        pageIndex = pageIndex.coerceIn(0, pageCount - 1)
+        val pageHeader = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(20), dp(16), dp(20), dp(16))
+            setBackgroundColor(0xb302051c.toInt())
         }
-        if (channels.isEmpty()) channelList.addView(label("No channels found in this genre.", 18, MUTED).apply { gravity = Gravity.CENTER }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, -1))
-        channelColumn.addView(channelList, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
-        body.addView(channelColumn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 0.52f))
+        val pageNav = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        pageNav.addView(pageArrow("◀", enabled = pageCount > 1) {
+            pageIndex = (pageIndex - 1 + pageCount) % pageCount
+            channelIndex = pageIndex * PAGE_SIZE
+            selectedByGenre[currentGenre()?.id ?: 0] = channelIndex
+            focusRestoreId = CHANNEL_ID_BASE + channelIndex
+            focusedArea = "channels"
+            renderPicker()
+        })
+        val pagePill = label("Page ${pageIndex + 1} of $pageCount", 13, DIM).apply {
+            typeface = Typeface.MONOSPACE
+            gravity = Gravity.CENTER
+            setPadding(dp(10), dp(4), dp(10), dp(4))
+            background = GradientDrawable().apply { cornerRadius = dp(12).toFloat(); setColor(0x59000000) }
+        }
+        pageNav.addView(pagePill)
+        pageNav.addView(pageArrow("▶", enabled = pageCount > 1) {
+            pageIndex = (pageIndex + 1) % pageCount
+            channelIndex = pageIndex * PAGE_SIZE
+            selectedByGenre[currentGenre()?.id ?: 0] = channelIndex
+            focusRestoreId = CHANNEL_ID_BASE + channelIndex
+            focusedArea = "channels"
+            renderPicker()
+        })
+        pageHeader.addView(pageNav, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        val genreTitle = label(currentGenre()?.name ?: "Channels", 24, WHITE, true).apply {
+            gravity = Gravity.CENTER
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setPadding(0, 0, 0, 0)
+        }
+        pageHeader.addView(genreTitle, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val countPill = label("${channels.size} ch", 13, DIM).apply {
+            typeface = Typeface.MONOSPACE
+            gravity = Gravity.CENTER
+            setPadding(dp(10), dp(4), dp(10), dp(4))
+            background = GradientDrawable().apply { cornerRadius = dp(12).toFloat(); setColor(0x59000000) }
+        }
+        pageHeader.addView(countPill, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        channelColumn.addView(pageHeader, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))
 
-        val side = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(10), 0, 0, 0) }
-        val chosen = channels.getOrNull(channelIndex)
-        val telemetry = buildString {
-            appendLine("POWER    ${state.isOn?.let { if (it) "ON" else "STANDBY" } ?: "—"}")
-            appendLine("VOLUME   ${state.volumeLevel?.let { "$it/${state.volumeMax}${if (state.muted == true) " MUTE" else ""}" } ?: "—"}")
-            appendLine("APP      ${state.currentApp?.substringAfterLast('.') ?: "TV Home"}")
-            appendLine("TUNED    ${lastTuned.ifBlank { "—" }}")
+        val channelList = fixedRows().apply { setPadding(dp(8), dp(5), dp(8), dp(5)) }
+        val pageStart = pageIndex * PAGE_SIZE
+        channels.drop(pageStart).take(PAGE_SIZE).forEachIndexed { offset, channel ->
+            channelList.addView(makeChannelRow(channel, pageStart + offset), LinearLayout.LayoutParams(-1, -1))
         }
-        val telemetryLabel = label(telemetry, 15, TEXT).apply { setBackground(panel(false, 0xff03061e.toInt())) }
-        pickerTelemetryLabel = telemetryLabel
-        side.addView(telemetryLabel)
-        side.addView(button(if (keypadOpen) "HIDE NUMPAD" else "🔢  NUMPAD") { focusRestoreId = KEYPAD_TOGGLE_ID; keypadOpen = !keypadOpen; renderPicker() }.apply { id = KEYPAD_TOGGLE_ID })
-        if (keypadOpen) {
-            side.addView(label("Focus: CHANNELS · ${chosen?.let { "#${it.dummyNumber} ${it.name}" } ?: "No Channel"}", 14, MUTED))
-            val digits = listOf(listOf("1", "2", "3"), listOf("4", "5", "6"), listOf("7", "8", "9"), listOf("CH ▲", "0", "CH ▼"))
-            digits.forEachIndexed { rowIndex, values ->
-                val line = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-                values.forEachIndexed { columnIndex, value ->
-                    val b = button(value) { if (value == "CH ▲") keypadCycle(-1) else if (value == "CH ▼") keypadCycle(1) else digit(value) }
-                        .apply { id = KEYPAD_BUTTON_BASE + rowIndex * 3 + columnIndex }
-                    line.addView(b, weight(1f))
-                }
-                side.addView(line)
+        if (channels.isEmpty()) {
+            channelList.addView(label("No channels found in this genre.", 20, DIM).apply {
+                gravity = Gravity.CENTER
+                setPadding(dp(30), dp(30), dp(30), dp(30))
+            }, LinearLayout.LayoutParams(-1, -1))
+        }
+        channelColumn.addView(channelList, LinearLayout.LayoutParams(-1, 0, 1f))
+        guide.addView(channelColumn, LinearLayout.LayoutParams(0, -1, 0.68f))
+        root.addView(guide, LinearLayout.LayoutParams(0, -1, 3f))
+        root.addView(View(this).apply { setBackgroundColor(0xaddcefff.toInt()) }, LinearLayout.LayoutParams(dp(2), -1))
+
+        val sidebar = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(20), dp(20), dp(20))
+            setBackgroundColor(0xbd02051a.toInt())
+        }
+        val sidebarScroll = ScrollView(this).apply { isFillViewport = false; clipChildren = false; clipToPadding = false }
+        val sidebarContent = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val brand = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, dp(12))
+        }
+        val titleAndPad = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        titleAndPad.addView(label("StbLab Picker", 18, TEXT, true).apply {
+            typeface = Typeface.MONOSPACE
+            letterSpacing = 0.1f
+            setPadding(0, 0, dp(8), 0)
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val state = remote.snapshot()
+        val toggle = compactButton(if (keypadOpen) "🔢 Hide Pad" else "🔢 NumPad", KEYPAD_TOGGLE_ID) {
+            keypadOpen = !keypadOpen
+            focusRestoreId = KEYPAD_TOGGLE_ID
+            renderPicker()
+        }.apply {
+            isSelected = keypadOpen
+            setBackground(if (keypadOpen) solidPanel(FOCUS, FOCUS, 1) else solidPanel(0xff1a293a.toInt(), 0xff52647b.toInt(), 1))
+            setTextColor(if (keypadOpen) 0xff071820.toInt() else TEXT)
+        }
+        titleAndPad.addView(toggle)
+        brand.addView(titleAndPad, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val connection = label(if (state.connected) "● LIVE" else "● OFFLINE", 12, if (state.connected) GREEN else AMBER, true).apply {
+            typeface = Typeface.MONOSPACE
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(6), 0, 0, 0)
+        }
+        pickerConnectionLabel = connection
+        brand.addView(connection)
+        sidebarContent.addView(brand)
+        sidebarContent.addView(View(this).apply { setBackgroundColor(0x6bd1e1ff.toInt()) }, LinearLayout.LayoutParams(-1, dp(1)))
+
+        if (keypadOpen) addVirtualKeypad(sidebarContent, channels.getOrNull(channelIndex))
+
+        val telemetryCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(14), dp(14), dp(14))
+            background = solidPanel(0xc7020519.toInt(), 0x77d6e5ff, 1, dp(6))
+        }
+        val telemetryRows = listOf(
+            "POWER" to (state.isOn?.let { if (it) "ON" else "STANDBY" } ?: "—"),
+            "VOLUME" to (state.volumeLevel?.let { "$it/${state.volumeMax}${if (state.muted == true) " (MUTE)" else ""}" } ?: "—"),
+            "APP" to (state.currentApp?.substringAfterLast('.') ?: "TV Home"),
+            "TUNED" to lastTuned.ifBlank { "—" },
+        )
+        telemetryRows.forEach { (name, value) ->
+            val line = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+            line.addView(label(name, 13, DIM).apply { typeface = Typeface.MONOSPACE; setPadding(0, dp(3), dp(8), dp(3)) }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            val valueLabel = label(value, 13, if (name == "TUNED") FOCUS else TEXT, name == "TUNED").apply {
+                typeface = Typeface.MONOSPACE
+                gravity = Gravity.END or Gravity.CENTER_VERTICAL
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                setPadding(0, dp(3), 0, dp(3))
             }
-            val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-            actions.addView(button("★ Favorites") { openFavorites() }.apply { id = KEYPAD_FAVORITES_ID }, weight(1f))
-            actions.addView(button("↶ Recall") { recall() }.apply { id = KEYPAD_RECALL_ID }, weight(1f))
-            side.addView(actions)
-            side.addView(button("OK · TUNE") { if (dial.isNotEmpty()) resolveDial() else chosen?.let(::tune) }.apply { id = KEYPAD_OK_ID })
+            when (name) {
+                "POWER" -> pickerPowerValue = valueLabel
+                "VOLUME" -> pickerVolumeValue = valueLabel
+                "APP" -> pickerAppValue = valueLabel
+                "TUNED" -> pickerTunedValue = valueLabel
+            }
+            line.addView(valueLabel, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            telemetryCard.addView(line)
         }
-        if (dial.isNotEmpty()) side.addView(label("DIRECT DIAL  #$dial\n${findDial(dial)?.name ?: "Channel not found"}", 17, AMBER, true))
-        val tuneLabel = label(tuningStatus, 15, FOCUS).apply { setBackground(panel(false, 0xff132a36.toInt())); visibility = if (tuningStatus.isBlank()) View.GONE else View.VISIBLE }
-        pickerTuneLabel = tuneLabel
-        side.addView(tuneLabel)
-        side.addView(label("◀ / ▶: move between lists\n▲ / ▼: focused list\nCH ▲ / ▼: channel step\nOK: tune · 0–9: direct dial\n229: Recall · 177: Favorites", 13, MUTED))
-        val sidebarScroll = ScrollView(this).apply { isFillViewport = false; addView(side) }
-        body.addView(sidebarScroll, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 0.25f))
-        root.addView(body)
+        sidebarContent.addView(telemetryCard, sidebarGapParams())
+
+        if (dial.isNotEmpty()) sidebarContent.addView(makeDialCard(), sidebarGapParams())
+        if (tuningStatus.isNotBlank()) {
+            val status = label(tuningStatus, 13, FOCUS).apply {
+                typeface = Typeface.MONOSPACE
+                background = solidPanel(0xc7242217.toInt(), FOCUS, 1, dp(4))
+                setPadding(dp(12), dp(8), dp(12), dp(8))
+            }
+            pickerTuneLabel = status
+            sidebarContent.addView(status, sidebarGapParams())
+        }
+
+        val hints = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            background = solidPanel(0x05000000, 0x77d6e5ff, 1, dp(6))
+        }
+        listOf(
+            "◀ / ▶  Move between guide and channel actions",
+            "▲ / ▼  Move through the focused list or keypad",
+            "CH ▼ / ▲  Next / previous channel",
+            "OK (Enter)  Tune selected",
+            "0–9  Direct dial (within 3s)",
+            "229  Recall previous channel",
+            "177  Open Favorites",
+            "170  Live TV",
+        ).forEach { hint -> hints.addView(label(hint, 13, DIM).apply { setPadding(0, dp(2), 0, dp(2)) }) }
+        hints.addView(label("Use TVQuickActions to map the advanced remote keys.", 11, MUTED).apply {
+            setPadding(0, dp(7), 0, 0)
+        })
+        sidebarContent.addView(hints, sidebarGapParams())
+
+        sidebarScroll.addView(sidebarContent)
+        sidebar.addView(sidebarScroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        val footer = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.END or Gravity.CENTER_VERTICAL
+            setPadding(0, dp(12), 0, 0)
+        }
+        footer.addView(button("⚙  SETTINGS") {
+            focusRestoreId = SETTINGS_BUTTON_ID
+            page = "settings"
+            renderSettings()
+        }.apply { id = SETTINGS_BUTTON_ID })
+        sidebar.addView(footer)
+        root.addView(sidebar, LinearLayout.LayoutParams(0, -1, 1f))
+
         setContentView(root)
-        if (focusRestoreId != View.NO_ID) {
-            val focusTarget = findViewById<View>(focusRestoreId)
-            if (focusTarget != null) focusTarget.requestFocus()
-            else if (channels.isNotEmpty()) main.post { findViewById<View>(CHANNEL_ID_BASE + channelIndex)?.requestFocus() }
-        } else if (channels.isNotEmpty()) {
-            main.post { findViewById<View>(CHANNEL_ID_BASE + channelIndex)?.requestFocus() }
+        val desiredFocus = focusRestoreId
+        main.post {
+            val restored = if (desiredFocus != View.NO_ID) findViewById<View>(desiredFocus)?.requestFocus() == true else false
+            if (!restored && channels.isNotEmpty()) {
+                focusRestoreId = CHANNEL_ID_BASE + channelIndex
+                findViewById<View>(focusRestoreId)?.requestFocus()
+            } else if (!restored && visibleGenres.isNotEmpty()) {
+                focusRestoreId = GENRE_ID_BASE + genreIndex
+                findViewById<View>(focusRestoreId)?.requestFocus()
+            }
         }
     }
 
+    private fun makeGenreRow(genre: GenreDto, index: Int): LinearLayout {
+        val selected = index == genreIndex
+        val row = LinearLayout(this).apply {
+            id = GENRE_ID_BASE + index
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            isFocusable = true
+            isFocusableInTouchMode = true
+            isClickable = true
+            setBackground(pickerPanel(selected, GENRE_SURFACE))
+        }
+        val stripe = View(this).apply { setBackgroundColor(if (selected) 0xffd9e6f1.toInt() else Color.TRANSPARENT) }
+        row.addView(stripe, LinearLayout.LayoutParams(dp(6), -1))
+        val title = label(genre.name, 20, if (selected) Color.BLACK else WHITE, true).apply {
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setPadding(dp(12), 0, dp(6), 0)
+        }
+        row.addView(title, LinearLayout.LayoutParams(0, -1, 1f))
+        val count = label(genre.channels.size.toString(), 14, if (selected) Color.BLACK else WHITE).apply {
+            typeface = Typeface.MONOSPACE
+            gravity = Gravity.CENTER_VERTICAL or Gravity.END
+            setPadding(0, 0, dp(14), 0)
+            alpha = if (selected) 1f else 0.7f
+        }
+        row.addView(count, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, -1))
+        row.onFocusChangeListener = View.OnFocusChangeListener { view, focused ->
+            if (focused && index != genreIndex) {
+                activateGenre(index, keepGenreFocus = true)
+                return@OnFocusChangeListener
+            }
+            if (focused) {
+                focusedArea = "genre"
+                focusRestoreId = view.id
+            }
+            view.background = pickerPanel(focused || index == genreIndex, GENRE_SURFACE, focused && focusedArea == "genre")
+            stripe.setBackgroundColor(if (focused || index == genreIndex) 0xffd9e6f1.toInt() else Color.TRANSPARENT)
+            val highlighted = focused || index == genreIndex
+            title.setTextColor(if (highlighted) Color.BLACK else WHITE)
+            count.setTextColor(if (highlighted) Color.BLACK else WHITE)
+            count.alpha = if (highlighted) 1f else 0.7f
+            view.elevation = if (focused) dp(6).toFloat() else 0f
+        }
+        row.setOnClickListener { activateGenre(index, keepGenreFocus = false) }
+        return row
+    }
+
+    private fun activateGenre(index: Int, keepGenreFocus: Boolean) {
+        val previousId = currentGenre()?.id
+        if (previousId != null) selectedByGenre[previousId] = channelIndex
+        genreIndex = index.coerceIn(0, (displayGenres().size - 1).coerceAtLeast(0))
+        val targetId = currentGenre()?.id
+        channelIndex = (targetId?.let { selectedByGenre[it] } ?: 0).coerceIn(0, (currentChannels().size - 1).coerceAtLeast(0))
+        pageIndex = channelIndex / PAGE_SIZE
+        focusedArea = if (keepGenreFocus) "genre" else "channels"
+        focusRestoreId = if (keepGenreFocus) GENRE_ID_BASE + genreIndex else CHANNEL_ID_BASE + channelIndex
+        renderPicker()
+    }
+
+    private fun addVirtualKeypad(parent: LinearLayout, activeChannel: ChannelDto?) {
+        val keypad = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(10), dp(10), dp(10), dp(10))
+            background = solidPanel(0xff131e2b.toInt(), 0xff3a4a60.toInt(), 1, dp(8))
+        }
+        val status = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(8), dp(5), dp(8), dp(5))
+            background = solidPanel(0x59000000, 0x10ffffff, 1, dp(4))
+        }
+        status.addView(label("FOCUS: ${focusedArea.uppercase()}", 10, ACCENT, true).apply {
+            typeface = Typeface.MONOSPACE
+            setPadding(0, 0, dp(5), 0)
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        status.addView(label(if (focusedArea == "channels") "● SELECTED" else "GENRE", 10, if (focusedArea == "channels") GREEN else DIM, true).apply {
+            typeface = Typeface.MONOSPACE
+            setPadding(0, 0, dp(5), 0)
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        val target = if (dial.isNotEmpty()) "#$dial" else activeChannel?.let { "#${it.dummyNumber} ${it.name}" } ?: currentGenre()?.name.orEmpty()
+        status.addView(label(target, 10, MUTED).apply {
+            typeface = Typeface.MONOSPACE
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            gravity = Gravity.END or Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, 0)
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        keypad.addView(status)
+
+        val values = listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "CH ▲", "0", "CH ▼")
+        values.chunked(3).forEachIndexed { rowIndex, rowValues ->
+            val line = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            rowValues.forEachIndexed { columnIndex, value ->
+                val id = KEYPAD_BUTTON_BASE + rowIndex * 3 + columnIndex
+                val control = keypadButton(value, id) {
+                    when (value) {
+                        "CH ▲" -> keypadCycle(-1)
+                        "CH ▼" -> keypadCycle(1)
+                        else -> digit(value)
+                    }
+                }
+                line.addView(control, LinearLayout.LayoutParams(0, dp(38), 1f).apply { setMargins(dp(3), dp(3), dp(3), dp(3)) })
+            }
+            keypad.addView(line)
+        }
+        val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        actions.addView(keypadButton("★ Favorites", KEYPAD_FAVORITES_ID) { openFavorites() }, LinearLayout.LayoutParams(0, dp(38), 1f).apply { setMargins(dp(3), dp(3), dp(3), dp(3)) })
+        actions.addView(keypadButton("↶ Recall", KEYPAD_RECALL_ID) { recall() }, LinearLayout.LayoutParams(0, dp(38), 1f).apply { setMargins(dp(3), dp(3), dp(3), dp(3)) })
+        keypad.addView(actions)
+        keypad.addView(keypadButton("OK  ·  ${if (dial.isNotEmpty()) "TUNE #$dial" else "TUNE SELECTED"}", KEYPAD_OK_ID) {
+            if (dial.isNotEmpty()) resolveDial() else activeChannel?.let(::tune)
+        }, LinearLayout.LayoutParams(-1, dp(40)).apply { setMargins(dp(3), dp(3), dp(3), dp(3)) })
+        parent.addView(keypad, sidebarGapParams())
+    }
+
+    private fun makeDialCard(): LinearLayout {
+        val dialCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(dp(16), dp(12), dp(16), dp(12))
+            background = solidPanel(0xff132a36.toInt(), FOCUS, 2, dp(6))
+        }
+        dialCard.addView(label("DIRECT CHANNEL DIAL", 12, FOCUS).apply {
+            typeface = Typeface.MONOSPACE
+            letterSpacing = 0.1f
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, dp(4))
+        })
+        dialCard.addView(label(dial, 52, FOCUS, true).apply {
+            typeface = Typeface.MONOSPACE
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, dp(4))
+        })
+        dialCard.addView(label(findDial(dial)?.name ?: "Channel not found", 16, TEXT, true).apply {
+            gravity = Gravity.CENTER
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        })
+        return dialCard
+    }
+
+    private fun pageArrow(text: String, enabled: Boolean, action: () -> Unit): TextView = label(text, 11, if (enabled) TEXT else 0x668f9aad, true).apply {
+        gravity = Gravity.CENTER
+        setPadding(0, 0, 0, 0)
+        alpha = if (enabled) 1f else 0.35f
+        setBackground(solidPanel(0xff172536.toInt(), 0xff52647b.toInt(), 1, dp(6)))
+        isClickable = enabled
+        isFocusable = false
+        setOnClickListener { if (enabled) action() }
+        layoutParams = LinearLayout.LayoutParams(dp(28), dp(28)).apply { if (text == "◀") marginEnd = dp(6) else marginStart = dp(6) }
+    }
+
+    private fun compactButton(text: String, idValue: Int, action: () -> Unit): Button = Button(this).apply {
+        id = idValue
+        text.let { setText(it) }
+        isAllCaps = false
+        isFocusable = true
+        isFocusableInTouchMode = true
+        minWidth = 0
+        minHeight = dp(30)
+        textSize = 11f
+        typeface = Typeface.MONOSPACE
+        setPadding(dp(8), dp(4), dp(8), dp(4))
+        setOnClickListener { action() }
+        onFocusChangeListener = View.OnFocusChangeListener { view, focused ->
+            if (focused) { focusedArea = "sidebar"; focusRestoreId = view.id }
+            view.background = buttonPanel(focused || isSelected, focused)
+            (view as? Button)?.setTextColor(if (focused || isSelected) Color.BLACK else TEXT)
+            view.elevation = if (focused) dp(5).toFloat() else 0f
+        }
+    }
+
+    private fun keypadButton(text: String, idValue: Int, action: () -> Unit): Button = compactButton(text, idValue, action).apply {
+        textSize = if (idValue == KEYPAD_OK_ID) 13f else 15f
+        typeface = Typeface.MONOSPACE
+        background = solidPanel(0xff1b2939.toInt(), 0xff44566d.toInt(), 1, dp(5))
+        setTextColor(TEXT)
+    }
+
+    private fun solidPanel(color: Int, stroke: Int, strokeDp: Int, radiusDp: Int = 5): GradientDrawable = GradientDrawable().apply {
+        cornerRadius = dp(radiusDp).toFloat()
+        setColor(color)
+        setStroke(dp(strokeDp), stroke)
+    }
+
+    private fun sidebarGapParams(): LinearLayout.LayoutParams = LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+        topMargin = dp(14)
+    }
     private fun focusChannelAt(index: Int) {
         val id = CHANNEL_ID_BASE + index
         focusRestoreId = id
@@ -281,40 +630,43 @@ class MainActivity : Activity() {
             isFocusable = true
             isFocusableInTouchMode = true
             isClickable = true
-            setPadding(dp(12), dp(6), dp(12), dp(6))
+            setPadding(dp(20), 0, dp(20), 0)
             contentDescription = "${channel.name}, channel ${channel.dummyNumber}, redirects to ${channel.redirectNumber}. Press OK to tune."
             setBackground(pickerPanel(index == channelIndex, CHANNEL_SURFACE))
         }
-        val number = label(channel.dummyNumber.toString(), 18, if (index == channelIndex) Color.BLACK else DIM, true).apply {
+        val number = label(channel.dummyNumber.toString(), 19, if (index == channelIndex) Color.BLACK else WHITE, true).apply {
             typeface = Typeface.MONOSPACE
             gravity = Gravity.CENTER_VERTICAL or Gravity.START
+            setPadding(0, 0, 0, 0)
         }
-        row.addView(number, LinearLayout.LayoutParams(dp(66), ViewGroup.LayoutParams.WRAP_CONTENT))
-        val name = label(channel.name, 19, if (index == channelIndex) Color.BLACK else TEXT, true).apply {
+        row.addView(number, LinearLayout.LayoutParams(dp(58), ViewGroup.LayoutParams.MATCH_PARENT))
+        val name = label(channel.name, 21, if (index == channelIndex) Color.BLACK else WHITE, true).apply {
             maxLines = 1
             ellipsize = android.text.TextUtils.TruncateAt.END
             gravity = Gravity.CENTER_VERTICAL or Gravity.START
+            setPadding(0, 0, dp(12), 0)
         }
-        row.addView(name, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        val redirect = label("→ ${channel.redirectNumber}", 15, if (index == channelIndex) Color.BLACK else DIM).apply {
+        row.addView(name, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
+        val redirect = label("→ ${channel.redirectNumber}", 14, if (index == channelIndex) Color.BLACK else WHITE).apply {
             typeface = Typeface.MONOSPACE
             gravity = Gravity.CENTER_VERTICAL or Gravity.END
-            setPadding(dp(8), dp(3), dp(8), dp(3))
-            background = GradientDrawable().apply { cornerRadius = dp(4).toFloat(); setColor(0x40000000) }
+            setPadding(dp(6), dp(1), dp(6), dp(1))
+            background = solidPanel(0x40000000, Color.TRANSPARENT, 0, dp(4))
         }
-        row.addView(redirect, LinearLayout.LayoutParams(dp(104), ViewGroup.LayoutParams.WRAP_CONTENT))
+        row.addView(redirect, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         row.onFocusChangeListener = View.OnFocusChangeListener { view, focused ->
             if (focused) {
                 val previous = channelIndex
                 if (previous != index) findViewById<View>(CHANNEL_ID_BASE + previous)?.let { old ->
-                    old.setBackground(panel(false, CHANNEL_SURFACE))
+                    old.setBackground(pickerPanel(false, CHANNEL_SURFACE))
                     old.elevation = 0f
                     old.scaleX = 1f
                     old.scaleY = 1f
                     (old as? LinearLayout)?.let { oldRow ->
-                        (oldRow.getChildAt(0) as? TextView)?.setTextColor(DIM)
-                        (oldRow.getChildAt(1) as? TextView)?.setTextColor(TEXT)
-                        (oldRow.getChildAt(2) as? TextView)?.setTextColor(DIM)
+                        (oldRow.getChildAt(0) as? TextView)?.setTextColor(WHITE)
+                        (oldRow.getChildAt(1) as? TextView)?.setTextColor(WHITE)
+                        (oldRow.getChildAt(2) as? TextView)?.setTextColor(WHITE)
+                        (oldRow.getChildAt(2) as? TextView)?.background = solidPanel(0x40000000, Color.TRANSPARENT, 0, dp(4))
                     }
                 }
                 focusedArea = "channels"
@@ -324,16 +676,15 @@ class MainActivity : Activity() {
                 focusRestoreId = view.id
             }
             val selected = focused || index == channelIndex
-            view.background = pickerPanel(selected, CHANNEL_SURFACE, focused)
-            view.elevation = if (focused) dp(12).toFloat() else 0f
-            view.scaleX = if (focused) 1.015f else 1f
-            view.scaleY = if (focused) 1.015f else 1f
-            number.setTextColor(if (selected) Color.BLACK else DIM)
-            name.setTextColor(if (selected) Color.BLACK else TEXT)
-            redirect.setTextColor(if (selected) Color.BLACK else DIM)
-            redirect.background = GradientDrawable().apply {
-                cornerRadius = dp(4).toFloat()
-                setColor(if (selected) 0x5cffffff else 0x40000000)
+            view.background = pickerPanel(selected, CHANNEL_SURFACE, focused && focusedArea == "channels")
+            view.elevation = if (selected || focused) dp(4).toFloat() else 0f
+            number.setTextColor(if (selected) Color.BLACK else WHITE)
+            name.setTextColor(if (selected) Color.BLACK else WHITE)
+            redirect.setTextColor(if (selected) Color.BLACK else WHITE)
+            redirect.background = solidPanel(if (selected) 0x57ffffff else 0x40000000, Color.TRANSPARENT, 0, dp(4))
+            if (focused) {
+                focusedArea = "channels"
+                focusRestoreId = view.id
             }
         }
         row.setOnClickListener {
@@ -407,6 +758,7 @@ class MainActivity : Activity() {
             val list = currentChannels()
             if (list.isEmpty()) return
             channelIndex = (channelIndex + delta + list.size) % list.size
+            selectedByGenre[currentGenre()?.id ?: 0] = channelIndex
             pageIndex = channelIndex / PAGE_SIZE
             renderPicker()
         }
@@ -433,15 +785,23 @@ class MainActivity : Activity() {
                     channelIndex = next
                     selectedByGenre[currentGenre()?.id ?: 0] = next
                     pageIndex = next / PAGE_SIZE
+                    focusedArea = "channels"
+                    focusRestoreId = CHANNEL_ID_BASE + next
                     renderPicker()
-                    focusChannelAt(next)
                     return true
                 }
                 KeyEvent.KEYCODE_DPAD_LEFT -> { findViewById<View>(GENRE_ID_BASE + genreIndex)?.requestFocus(); return true }
                 KeyEvent.KEYCODE_DPAD_RIGHT -> { focusRestoreId = KEYPAD_TOGGLE_ID; findViewById<View>(KEYPAD_TOGGLE_ID)?.requestFocus(); return true }
             }
-            activeId == KEYPAD_TOGGLE_ID && keypadOpen -> when (keyCode) {
-                KeyEvent.KEYCODE_DPAD_DOWN -> { findViewById<View>(KEYPAD_BUTTON_BASE)?.requestFocus(); return true }
+            activeId == KEYPAD_TOGGLE_ID -> when (keyCode) {
+                KeyEvent.KEYCODE_DPAD_DOWN -> {
+                    findViewById<View>(if (keypadOpen) KEYPAD_BUTTON_BASE else SETTINGS_BUTTON_ID)?.requestFocus()
+                    return true
+                }
+                KeyEvent.KEYCODE_DPAD_LEFT -> { focusChannelAt(channelIndex); return true }
+            }
+            activeId == SETTINGS_BUTTON_ID -> when (keyCode) {
+                KeyEvent.KEYCODE_DPAD_UP -> { findViewById<View>(if (keypadOpen) KEYPAD_OK_ID else KEYPAD_TOGGLE_ID)?.requestFocus(); return true }
                 KeyEvent.KEYCODE_DPAD_LEFT -> { focusChannelAt(channelIndex); return true }
             }
             keypadOpen && activeId in KEYPAD_BUTTON_BASE..KEYPAD_OK_ID -> return moveKeypadFocus(activeId, keyCode)
@@ -464,7 +824,7 @@ class MainActivity : Activity() {
                         else -> KEYPAD_RECALL_ID
                     }
                     KeyEvent.KEYCODE_DPAD_LEFT -> if (col > 0) activeId - 1 else if (row == 0) CHANNEL_ID_BASE + channelIndex else CHANNEL_ID_BASE + channelIndex
-                    KeyEvent.KEYCODE_DPAD_RIGHT -> if (col < 2) activeId + 1 else KEYPAD_TOGGLE_ID
+                    KeyEvent.KEYCODE_DPAD_RIGHT -> if (col < 2) activeId + 1 else return true
                     else -> return false
                 }
             }
@@ -477,15 +837,15 @@ class MainActivity : Activity() {
             }
             activeId == KEYPAD_RECALL_ID -> when (keyCode) {
                 KeyEvent.KEYCODE_DPAD_LEFT -> KEYPAD_FAVORITES_ID
-                KeyEvent.KEYCODE_DPAD_UP -> KEYPAD_BUTTON_BASE + 11
+                KeyEvent.KEYCODE_DPAD_UP -> KEYPAD_BUTTON_BASE + 10
                 KeyEvent.KEYCODE_DPAD_DOWN -> KEYPAD_OK_ID
-                KeyEvent.KEYCODE_DPAD_RIGHT -> KEYPAD_TOGGLE_ID
+                KeyEvent.KEYCODE_DPAD_RIGHT -> return true
                 else -> return false
             }
             activeId == KEYPAD_OK_ID -> when (keyCode) {
                 KeyEvent.KEYCODE_DPAD_UP -> KEYPAD_RECALL_ID
                 KeyEvent.KEYCODE_DPAD_LEFT -> CHANNEL_ID_BASE + channelIndex
-                KeyEvent.KEYCODE_DPAD_RIGHT -> KEYPAD_TOGGLE_ID
+                KeyEvent.KEYCODE_DPAD_RIGHT -> return true
                 else -> return false
             }
             else -> return false
@@ -506,6 +866,8 @@ class MainActivity : Activity() {
         val item = genres.flatMap { it.channels }.firstOrNull { it.id == id } ?: return
         genreIndex = displayGenres().indexOfFirst { it.id == item.genreId }.coerceAtLeast(0)
         channelIndex = currentChannels().indexOfFirst { it.id == id }.coerceAtLeast(0); pageIndex = channelIndex / PAGE_SIZE
+        focusedArea = "channels"
+        focusRestoreId = CHANNEL_ID_BASE + channelIndex
         tune(item)
     }
     private fun tune(channel: ChannelDto, fast: Boolean = false) {
@@ -759,12 +1121,10 @@ class MainActivity : Activity() {
             it.text = if (state.connected) "● LIVE" else "● OFFLINE"
             it.setTextColor(if (state.connected) GREEN else AMBER)
         }
-        pickerTelemetryLabel?.text = buildString {
-            appendLine("POWER    ${state.isOn?.let { if (it) "ON" else "STANDBY" } ?: "—"}")
-            appendLine("VOLUME   ${state.volumeLevel?.let { "$it/${state.volumeMax}${if (state.muted == true) " MUTE" else ""}" } ?: "—"}")
-            appendLine("APP      ${state.currentApp?.substringAfterLast('.') ?: "TV Home"}")
-            appendLine("TUNED    ${lastTuned.ifBlank { "—" }}")
-        }
+        pickerPowerValue?.text = state.isOn?.let { if (it) "ON" else "STANDBY" } ?: "—"
+        pickerVolumeValue?.text = state.volumeLevel?.let { "$it/${state.volumeMax}${if (state.muted == true) " (MUTE)" else ""}" } ?: "—"
+        pickerAppValue?.text = state.currentApp?.substringAfterLast('.') ?: "TV Home"
+        pickerTunedValue?.text = lastTuned.ifBlank { "—" }
         settingsRemoteLabel?.let {
             it.text = "Remote ${if (state.connected) "Connected to ${state.model ?: state.host}" else state.status + (state.error?.let { message -> " · $message" } ?: "")}"
             it.setTextColor(if (state.connected) GREEN else AMBER)
@@ -788,7 +1148,6 @@ class MainActivity : Activity() {
         hint = hintValue; setText(value); setTextColor(TEXT); setHintTextColor(MUTED); setSingleLine(true); setBackground(panel(false)); setPadding(dp(12), dp(8), dp(12), dp(8))
         onFocusChangeListener = View.OnFocusChangeListener { view, focused -> view.background = panel(focused); if (focused) view.elevation = dp(4).toFloat() else view.elevation = 0f }
     }
-    private fun column(title: String, ignored: Float): LinearLayout = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(4), dp(4), dp(4), dp(4)); addView(label(title, 15, ACCENT, true)) }
     private fun label(value: String, size: Int, color: Int = WHITE, bold: Boolean = false): TextView = TextView(this).apply {
         text = value; textSize = size.toFloat(); setTextColor(color); setPadding(dp(10), dp(8), dp(10), dp(8)); if (bold) setTypeface(typeface, Typeface.BOLD)
     }
@@ -796,7 +1155,10 @@ class MainActivity : Activity() {
         text = value; isAllCaps = false; isFocusable = true; isFocusableInTouchMode = true; setTextColor(TEXT); textSize = 15f
         setPadding(dp(12), dp(7), dp(12), dp(7)); background = panel(false)
         onFocusChangeListener = View.OnFocusChangeListener { view, focused ->
-            if (focused && view.id != View.NO_ID) focusRestoreId = view.id
+            if (focused && view.id != View.NO_ID) {
+                focusRestoreId = view.id
+                if (page == "picker") focusedArea = "sidebar"
+            }
             view.background = buttonPanel(focused || isSelected, focused)
             (view as? Button)?.setTextColor(if (focused || isSelected) Color.BLACK else TEXT)
             view.elevation = if (focused) dp(10).toFloat() else 0f
@@ -814,7 +1176,14 @@ class MainActivity : Activity() {
         setStroke(dp(if (active) 2 else 1), if (active) 0xffd4e4f0.toInt() else BORDER)
     }
     private fun pickerPanel(active: Boolean, idleColor: Int, focused: Boolean = false): Drawable {
-        val fill = panel(active, idleColor)
+        val fill = GradientDrawable().apply {
+            cornerRadius = dp(5).toFloat()
+            if (active) {
+                orientation = GradientDrawable.Orientation.TOP_BOTTOM
+                colors = intArrayOf(0xfa2fc2ff.toInt(), 0xf70ea5f7.toInt(), 0xf50089e5.toInt())
+            } else setColor(0x9401051a.toInt())
+            setStroke(dp(1), if (active) 0xf2caf0ff.toInt() else 0x80d5e6ff.toInt())
+        }
         if (!focused) return fill
         return LayerDrawable(arrayOf(fill, SelectorRingDrawable(dp(5).toFloat(), dp(4).toFloat())))
     }
