@@ -64,6 +64,13 @@ class MainActivity : Activity() {
     private var pickerVolumeValue: TextView? = null
     private var pickerAppValue: TextView? = null
     private var pickerTunedValue: TextView? = null
+    private var pickerGenreRows: List<View> = emptyList()
+    private var pickerChannelList: LinearLayout? = null
+    private var pickerGenreTitle: TextView? = null
+    private var pickerCountLabel: TextView? = null
+    private var pickerPageLabel: TextView? = null
+    private var pickerPrevArrow: TextView? = null
+    private var pickerNextArrow: TextView? = null
     private var settingsRemoteLabel: TextView? = null
     private var pairingStatusLabel: TextView? = null
     private val poll = object : Runnable {
@@ -219,6 +226,7 @@ class MainActivity : Activity() {
         visibleGenres.forEachIndexed { index, genre ->
             genreList.addView(makeGenreRow(genre, index), LinearLayout.LayoutParams(-1, -1))
         }
+        pickerGenreRows = (0 until genreList.childCount).map { genreList.getChildAt(it) }
         genreColumn.addView(genreList, LinearLayout.LayoutParams(-1, 0, 1f))
         guide.addView(genreColumn, LinearLayout.LayoutParams(0, -1, 0.32f))
 
@@ -238,29 +246,34 @@ class MainActivity : Activity() {
             setBackgroundColor(0xb302051c.toInt())
         }
         val pageNav = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        pageNav.addView(pageArrow("◀", enabled = pageCount > 1) {
+        val previousPage = pageArrow("◀", enabled = pageCount > 1) {
             pageIndex = (pageIndex - 1 + pageCount) % pageCount
             channelIndex = pageIndex * PAGE_SIZE
             selectedByGenre[currentGenre()?.id ?: 0] = channelIndex
             focusRestoreId = CHANNEL_ID_BASE + channelIndex
             focusedArea = "channels"
             renderPicker()
-        })
+        }
+        pickerPrevArrow = previousPage
+        pageNav.addView(previousPage)
         val pagePill = label("Page ${pageIndex + 1} of $pageCount", 13, DIM).apply {
             typeface = Typeface.MONOSPACE
             gravity = Gravity.CENTER
             setPadding(dp(10), dp(4), dp(10), dp(4))
             background = GradientDrawable().apply { cornerRadius = dp(12).toFloat(); setColor(0x59000000) }
         }
+        pickerPageLabel = pagePill
         pageNav.addView(pagePill)
-        pageNav.addView(pageArrow("▶", enabled = pageCount > 1) {
+        val nextPage = pageArrow("▶", enabled = pageCount > 1) {
             pageIndex = (pageIndex + 1) % pageCount
             channelIndex = pageIndex * PAGE_SIZE
             selectedByGenre[currentGenre()?.id ?: 0] = channelIndex
             focusRestoreId = CHANNEL_ID_BASE + channelIndex
             focusedArea = "channels"
             renderPicker()
-        })
+        }
+        pickerNextArrow = nextPage
+        pageNav.addView(nextPage)
         pageHeader.addView(pageNav, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         val genreTitle = label(currentGenre()?.name ?: "Channels", 24, WHITE, true).apply {
             gravity = Gravity.CENTER
@@ -268,6 +281,7 @@ class MainActivity : Activity() {
             ellipsize = android.text.TextUtils.TruncateAt.END
             setPadding(0, 0, 0, 0)
         }
+        pickerGenreTitle = genreTitle
         pageHeader.addView(genreTitle, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         val countPill = label("${channels.size} ch", 13, DIM).apply {
             typeface = Typeface.MONOSPACE
@@ -275,6 +289,7 @@ class MainActivity : Activity() {
             setPadding(dp(10), dp(4), dp(10), dp(4))
             background = GradientDrawable().apply { cornerRadius = dp(12).toFloat(); setColor(0x59000000) }
         }
+        pickerCountLabel = countPill
         pageHeader.addView(countPill, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         channelColumn.addView(pageHeader, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))
 
@@ -289,6 +304,7 @@ class MainActivity : Activity() {
                 setPadding(dp(30), dp(30), dp(30), dp(30))
             }, LinearLayout.LayoutParams(-1, -1))
         }
+        pickerChannelList = channelList
         channelColumn.addView(channelList, LinearLayout.LayoutParams(-1, 0, 1f))
         guide.addView(channelColumn, LinearLayout.LayoutParams(0, -1, 0.68f))
         root.addView(guide, LinearLayout.LayoutParams(0, -1, 3f))
@@ -302,18 +318,21 @@ class MainActivity : Activity() {
         val sidebarScroll = ScrollView(this).apply { isFillViewport = false; clipChildren = false; clipToPadding = false }
         val sidebarContent = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val brand = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.START
             setPadding(0, 0, 0, dp(12))
         }
-        val titleAndPad = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        titleAndPad.addView(label("StbLab Picker", 18, TEXT, true).apply {
-            typeface = Typeface.MONOSPACE
-            letterSpacing = 0.1f
-            setPadding(0, 0, dp(8), 0)
-        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        brand.addView(label("StbLab Picker", 17, TEXT, true).apply {
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setPadding(0, 0, 0, dp(8))
+        }, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))
+        val headerControls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
         val state = remote.snapshot()
-        val toggle = compactButton(if (keypadOpen) "🔢 Hide Pad" else "🔢 NumPad", KEYPAD_TOGGLE_ID) {
+        val toggle = compactButton(if (keypadOpen) "Hide Pad" else "🔢 NumPad", KEYPAD_TOGGLE_ID) {
             keypadOpen = !keypadOpen
             focusRestoreId = KEYPAD_TOGGLE_ID
             renderPicker()
@@ -322,15 +341,16 @@ class MainActivity : Activity() {
             setBackground(if (keypadOpen) solidPanel(FOCUS, FOCUS, 1) else solidPanel(0xff1a293a.toInt(), 0xff52647b.toInt(), 1))
             setTextColor(if (keypadOpen) 0xff071820.toInt() else TEXT)
         }
-        titleAndPad.addView(toggle)
-        brand.addView(titleAndPad, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        headerControls.addView(toggle)
         val connection = label(if (state.connected) "● LIVE" else "● OFFLINE", 12, if (state.connected) GREEN else AMBER, true).apply {
             typeface = Typeface.MONOSPACE
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(6), 0, 0, 0)
+            gravity = Gravity.CENTER_VERTICAL or Gravity.END
+            maxLines = 1
+            setPadding(dp(4), 0, 0, 0)
         }
         pickerConnectionLabel = connection
-        brand.addView(connection)
+        headerControls.addView(connection, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        brand.addView(headerControls, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))
         sidebarContent.addView(brand)
         sidebarContent.addView(View(this).apply { setBackgroundColor(0x6bd1e1ff.toInt()) }, LinearLayout.LayoutParams(-1, dp(1)))
 
@@ -484,7 +504,56 @@ class MainActivity : Activity() {
         pageIndex = channelIndex / PAGE_SIZE
         focusedArea = if (keepGenreFocus) "genre" else "channels"
         focusRestoreId = if (keepGenreFocus) GENRE_ID_BASE + genreIndex else CHANNEL_ID_BASE + channelIndex
-        renderPicker()
+        refreshGenreRows()
+        refreshChannelRows()
+        if (!keepGenreFocus) main.post { findViewById<View>(focusRestoreId)?.requestFocus() }
+    }
+
+    private fun refreshGenreRows() {
+        pickerGenreRows.forEachIndexed { index, row ->
+            val selected = index == genreIndex
+            val focused = row.hasFocus() && focusedArea == "genre"
+            row.background = pickerPanel(selected || focused, GENRE_SURFACE, focused)
+            row.elevation = if (focused) dp(6).toFloat() else 0f
+            (row as? LinearLayout)?.let { item ->
+                item.getChildAt(0)?.setBackgroundColor(if (selected || focused) 0xffd9e6f1.toInt() else Color.TRANSPARENT)
+                (item.getChildAt(1) as? TextView)?.setTextColor(if (selected || focused) Color.BLACK else WHITE)
+                (item.getChildAt(2) as? TextView)?.apply {
+                    setTextColor(if (selected || focused) Color.BLACK else WHITE)
+                    alpha = if (selected || focused) 1f else 0.7f
+                }
+            }
+        }
+    }
+
+    private fun refreshChannelRows() {
+        val list = pickerChannelList ?: return
+        val channels = currentChannels()
+        val pageCount = ((channels.size + PAGE_SIZE - 1) / PAGE_SIZE).coerceAtLeast(1)
+        pageIndex = (channelIndex / PAGE_SIZE).coerceIn(0, pageCount - 1)
+        pickerGenreTitle?.text = currentGenre()?.name ?: "Channels"
+        pickerCountLabel?.text = "${channels.size} ch"
+        pickerPageLabel?.text = "Page ${pageIndex + 1} of $pageCount"
+        list.removeAllViews()
+        val start = pageIndex * PAGE_SIZE
+        channels.drop(start).take(PAGE_SIZE).forEachIndexed { offset, channel ->
+            list.addView(makeChannelRow(channel, start + offset), LinearLayout.LayoutParams(-1, -1))
+        }
+        if (channels.isEmpty()) {
+            list.addView(label("No channels found in this genre.", 20, DIM).apply {
+                gravity = Gravity.CENTER
+                setPadding(dp(30), dp(30), dp(30), dp(30))
+            }, LinearLayout.LayoutParams(-1, -1))
+        }
+        updatePageArrow(pickerPrevArrow, pageCount > 1)
+        updatePageArrow(pickerNextArrow, pageCount > 1)
+    }
+
+    private fun updatePageArrow(view: TextView?, enabled: Boolean) {
+        view ?: return
+        view.isClickable = enabled
+        view.alpha = if (enabled) 1f else 0.35f
+        view.setTextColor(if (enabled) TEXT else 0x668f9aad)
     }
 
     private fun addVirtualKeypad(parent: LinearLayout, activeChannel: ChannelDto?) {
@@ -782,12 +851,21 @@ class MainActivity : Activity() {
                     if (count == 0) return true
                     val delta = if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) 1 else -1
                     val next = (channelIndex + delta + count) % count
-                    channelIndex = next
-                    selectedByGenre[currentGenre()?.id ?: 0] = next
-                    pageIndex = next / PAGE_SIZE
                     focusedArea = "channels"
-                    focusRestoreId = CHANNEL_ID_BASE + next
-                    renderPicker()
+                    val nextPage = next / PAGE_SIZE
+                    if (nextPage != pageIndex) {
+                        channelIndex = next
+                        pageIndex = nextPage
+                        selectedByGenre[currentGenre()?.id ?: 0] = next
+                        focusRestoreId = CHANNEL_ID_BASE + next
+                        refreshChannelRows()
+                        // Request focus synchronously: a posted request leaves a brief
+                        // no-focus window where the next remote repeat can escape to Genre.
+                        findViewById<View>(focusRestoreId)?.requestFocus()
+                    } else {
+                        focusRestoreId = CHANNEL_ID_BASE + next
+                        findViewById<View>(focusRestoreId)?.requestFocus()
+                    }
                     return true
                 }
                 KeyEvent.KEYCODE_DPAD_LEFT -> { findViewById<View>(GENRE_ID_BASE + genreIndex)?.requestFocus(); return true }
@@ -806,7 +884,31 @@ class MainActivity : Activity() {
             }
             keypadOpen && activeId in KEYPAD_BUTTON_BASE..KEYPAD_OK_ID -> return moveKeypadFocus(activeId, keyCode)
         }
+        // Keep rapid repeated Up/Down presses inside Channels while a page swap is
+        // replacing the focused row or when Android temporarily reports no focused id.
+        if (focusedArea == "channels") {
+            when (keyCode) {
+                KeyEvent.KEYCODE_DPAD_UP -> { moveChannelSelection(-1); return true }
+                KeyEvent.KEYCODE_DPAD_DOWN -> { moveChannelSelection(1); return true }
+            }
+        }
         return false
+    }
+
+    private fun moveChannelSelection(delta: Int) {
+        val channels = currentChannels()
+        if (channels.isEmpty()) return
+        val next = (channelIndex + delta + channels.size) % channels.size
+        val nextPage = next / PAGE_SIZE
+        focusedArea = "channels"
+        focusRestoreId = CHANNEL_ID_BASE + next
+        if (nextPage != pageIndex) {
+            channelIndex = next
+            pageIndex = nextPage
+            selectedByGenre[currentGenre()?.id ?: 0] = next
+            refreshChannelRows()
+        }
+        findViewById<View>(focusRestoreId)?.requestFocus()
     }
     private fun moveKeypadFocus(activeId: Int, keyCode: Int): Boolean {
         val targetId = when {
