@@ -5,8 +5,15 @@ import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.RectF
+import android.graphics.Shader
+import android.graphics.LinearGradient
 import android.graphics.Typeface
+import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.LayerDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
@@ -160,15 +167,16 @@ class MainActivity : Activity() {
 
         val body = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; layoutParams = LinearLayout.LayoutParams(-1, 0, 1f) }
         val genreColumn = column("GENRE", 0.23f)
+        val genreList = fixedRows()
         val dg = displayGenres()
         dg.forEachIndexed { i, genre ->
             val item = button("${genre.name}   ${genre.channels.size}") { jumpGenre(i); focusChannelAt(channelIndex) }.apply { id = GENRE_ID_BASE + i }
             item.gravity = Gravity.CENTER_VERTICAL or Gravity.START
-            item.setBackground(panel(i == genreIndex, GENRE_SURFACE))
+            item.setBackground(pickerPanel(i == genreIndex, GENRE_SURFACE))
             item.isSelected = i == genreIndex
             item.setTextColor(if (i == genreIndex) Color.BLACK else DIM)
             item.onFocusChangeListener = View.OnFocusChangeListener { _, focused ->
-            item.setBackground(panel(focused || i == genreIndex, GENRE_SURFACE, focused))
+                item.setBackground(pickerPanel(focused || i == genreIndex, GENRE_SURFACE, focused))
                 item.setTextColor(if (focused || i == genreIndex) Color.BLACK else DIM)
                 item.elevation = if (focused) dp(10).toFloat() else 0f
                 item.scaleX = if (focused) 1.015f else 1f
@@ -187,29 +195,27 @@ class MainActivity : Activity() {
                     }
                 }
             }
-            genreColumn.addView(item, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+            genreList.addView(item, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, -1))
         }
+        genreColumn.addView(genreList, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         body.addView(genreColumn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 0.23f))
 
         val channelColumn = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(10), 0, dp(10), 0) }
         val channels = currentChannels()
         val chunks = ((channels.size + PAGE_SIZE - 1) / PAGE_SIZE).coerceAtLeast(1)
         val pageRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-        pageRow.addView(button("◀  PREV") { if (chunks > 1) { pageIndex = (pageIndex - 1 + chunks) % chunks; channelIndex = pageIndex * PAGE_SIZE; renderPicker(); focusChannelAt(channelIndex) } })
+        pageRow.addView(button("◀  PREV") { if (chunks > 1) { pageIndex = (pageIndex - 1 + chunks) % chunks; channelIndex = pageIndex * PAGE_SIZE; renderPicker(); focusChannelAt(channelIndex) } }.apply { isFocusable = false; isFocusableInTouchMode = false })
         pageRow.addView(label("Page ${pageIndex + 1} of $chunks  ·  ${currentGenre()?.name ?: "Channels"} · ${channels.size} ch", 16, MUTED, true), weight(1f))
-        pageRow.addView(button("NEXT  ▶") { if (chunks > 1) { pageIndex = (pageIndex + 1) % chunks; channelIndex = pageIndex * PAGE_SIZE; renderPicker(); focusChannelAt(channelIndex) } })
+        pageRow.addView(button("NEXT  ▶") { if (chunks > 1) { pageIndex = (pageIndex + 1) % chunks; channelIndex = pageIndex * PAGE_SIZE; renderPicker(); focusChannelAt(channelIndex) } }.apply { isFocusable = false; isFocusableInTouchMode = false })
         channelColumn.addView(pageRow)
-        val channelList = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
-        }
+        val channelList = fixedRows()
         val start = pageIndex * PAGE_SIZE
         channels.drop(start).take(PAGE_SIZE).forEachIndexed { offset, ch ->
             val absolute = start + offset
             val row = makeChannelRow(ch, absolute)
-            channelList.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+            channelList.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, -1))
         }
-        if (channels.isEmpty()) channelList.addView(label("No channels found in this genre.", 18, MUTED), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        if (channels.isEmpty()) channelList.addView(label("No channels found in this genre.", 18, MUTED).apply { gravity = Gravity.CENTER }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, -1))
         channelColumn.addView(channelList, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         body.addView(channelColumn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 0.52f))
 
@@ -277,7 +283,7 @@ class MainActivity : Activity() {
             isClickable = true
             setPadding(dp(12), dp(6), dp(12), dp(6))
             contentDescription = "${channel.name}, channel ${channel.dummyNumber}, redirects to ${channel.redirectNumber}. Press OK to tune."
-            setBackground(panel(index == channelIndex, CHANNEL_SURFACE))
+            setBackground(pickerPanel(index == channelIndex, CHANNEL_SURFACE))
         }
         val number = label(channel.dummyNumber.toString(), 18, if (index == channelIndex) Color.BLACK else DIM, true).apply {
             typeface = Typeface.MONOSPACE
@@ -294,6 +300,7 @@ class MainActivity : Activity() {
             typeface = Typeface.MONOSPACE
             gravity = Gravity.CENTER_VERTICAL or Gravity.END
             setPadding(dp(8), dp(3), dp(8), dp(3))
+            background = GradientDrawable().apply { cornerRadius = dp(4).toFloat(); setColor(0x40000000) }
         }
         row.addView(redirect, LinearLayout.LayoutParams(dp(104), ViewGroup.LayoutParams.WRAP_CONTENT))
         row.onFocusChangeListener = View.OnFocusChangeListener { view, focused ->
@@ -317,13 +324,17 @@ class MainActivity : Activity() {
                 focusRestoreId = view.id
             }
             val selected = focused || index == channelIndex
-            view.background = panel(selected, CHANNEL_SURFACE, focused)
+            view.background = pickerPanel(selected, CHANNEL_SURFACE, focused)
             view.elevation = if (focused) dp(12).toFloat() else 0f
             view.scaleX = if (focused) 1.015f else 1f
             view.scaleY = if (focused) 1.015f else 1f
             number.setTextColor(if (selected) Color.BLACK else DIM)
             name.setTextColor(if (selected) Color.BLACK else TEXT)
             redirect.setTextColor(if (selected) Color.BLACK else DIM)
+            redirect.background = GradientDrawable().apply {
+                cornerRadius = dp(4).toFloat()
+                setColor(if (selected) 0x5cffffff else 0x40000000)
+            }
         }
         row.setOnClickListener {
             channelIndex = index
@@ -348,11 +359,32 @@ class MainActivity : Activity() {
         main.postDelayed(dialTask!!, if (completed) 350 else 3000)
         renderPicker()
     }
-    private fun resolveDial() { val item = findDial(dial); dialTask?.let(main::removeCallbacks); dial = ""; if (item != null) tune(item) else renderPicker() }
+    private fun resolveDial() {
+        val item = findDial(dial)
+        dialTask?.let(main::removeCallbacks)
+        dialTask = null
+        dial = ""
+        if (item == null) { renderPicker(); return }
+        val targetGenre = displayGenres().indexOfFirst { genre -> genre.channels.any { it.id == item.id } }
+        if (targetGenre >= 0) {
+            val oldGenreId = currentGenre()?.id
+            if (oldGenreId != null) selectedByGenre[oldGenreId] = channelIndex
+            genreIndex = targetGenre
+            channelIndex = currentChannels().indexOfFirst { it.id == item.id }.coerceAtLeast(0)
+            selectedByGenre[currentGenre()?.id ?: 0] = channelIndex
+            pageIndex = channelIndex / PAGE_SIZE
+            focusedArea = "channels"
+            focusRestoreId = CHANNEL_ID_BASE + channelIndex
+        }
+        tune(item)
+    }
     private fun stepChannel(delta: Int) {
         channelStepTask?.let(main::removeCallbacks)
         val list = currentChannels(); if (list.isEmpty()) return
         channelIndex = (channelIndex + delta + list.size) % list.size; pageIndex = channelIndex / PAGE_SIZE
+        selectedByGenre[currentGenre()?.id ?: 0] = channelIndex
+        focusedArea = "channels"
+        focusRestoreId = CHANNEL_ID_BASE + channelIndex
         val target = list[channelIndex]
         tuningStatus = "Channel ${if (delta < 0) "Up" else "Down"}: ${target.dummyNumber} ${target.name} · tuning in 3s"
         renderPicker()
@@ -765,7 +797,7 @@ class MainActivity : Activity() {
         setPadding(dp(12), dp(7), dp(12), dp(7)); background = panel(false)
         onFocusChangeListener = View.OnFocusChangeListener { view, focused ->
             if (focused && view.id != View.NO_ID) focusRestoreId = view.id
-            view.background = panel(focused || isSelected, focused = focused)
+            view.background = buttonPanel(focused || isSelected, focused)
             (view as? Button)?.setTextColor(if (focused || isSelected) Color.BLACK else TEXT)
             view.elevation = if (focused) dp(10).toFloat() else 0f
             view.scaleX = if (focused) 1.015f else 1f
@@ -773,17 +805,66 @@ class MainActivity : Activity() {
         }
         setOnClickListener { action() }
     }
-    private fun panel(active: Boolean, idleColor: Int = SURFACE, focused: Boolean = false): GradientDrawable = GradientDrawable().apply {
+    private fun panel(active: Boolean, idleColor: Int = SURFACE): GradientDrawable = GradientDrawable().apply {
         cornerRadius = dp(5).toFloat()
         if (active) {
             orientation = GradientDrawable.Orientation.TOP_BOTTOM
             colors = intArrayOf(0xff2fc2ff.toInt(), 0xff0ea5f7.toInt(), 0xff0089e5.toInt())
         } else setColor(idleColor)
-        setStroke(dp(if (focused) 4 else if (active) 2 else 1), when {
-            focused -> FOCUS
-            active -> 0xffd4e4f0.toInt()
-            else -> BORDER
-        })
+        setStroke(dp(if (active) 2 else 1), if (active) 0xffd4e4f0.toInt() else BORDER)
+    }
+    private fun pickerPanel(active: Boolean, idleColor: Int, focused: Boolean = false): Drawable {
+        val fill = panel(active, idleColor)
+        if (!focused) return fill
+        return LayerDrawable(arrayOf(fill, SelectorRingDrawable(dp(5).toFloat(), dp(4).toFloat())))
+    }
+    private fun buttonPanel(active: Boolean, focused: Boolean): Drawable {
+        if (!focused) return panel(active)
+        return GradientDrawable().apply {
+            cornerRadius = dp(5).toFloat()
+            orientation = GradientDrawable.Orientation.TOP_BOTTOM
+            colors = intArrayOf(0xfffff59d.toInt(), 0xffffd43b.toInt(), 0xffff9f1c.toInt())
+            setStroke(dp(3), Color.WHITE)
+        }
+    }
+    private fun fixedRows(): LinearLayout = object : LinearLayout(this) {
+        init { orientation = LinearLayout.VERTICAL; clipChildren = false; clipToPadding = false }
+        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+            super.onMeasure(widthMeasureSpec, heightMeasureSpec)
+            if (childCount == 1 && getChildAt(0).id == View.NO_ID) return
+            val slotHeight = ((measuredHeight - paddingTop - paddingBottom) / PAGE_SIZE).coerceAtLeast(1)
+            var changed = false
+            for (index in 0 until childCount) {
+                val params = getChildAt(index).layoutParams as? LinearLayout.LayoutParams ?: continue
+                if (params.height != slotHeight || params.weight != 0f) {
+                    params.height = slotHeight
+                    params.weight = 0f
+                    getChildAt(index).layoutParams = params
+                    changed = true
+                }
+            }
+            if (changed) super.onMeasure(widthMeasureSpec, heightMeasureSpec)
+        }
+    }
+    private inner class SelectorRingDrawable(
+        private val radius: Float,
+        private val strokeWidth: Float,
+    ) : Drawable() {
+        private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; this.strokeWidth = this@SelectorRingDrawable.strokeWidth }
+        override fun draw(canvas: Canvas) {
+            val b = bounds
+            val inset = strokeWidth / 2f
+            paint.shader = LinearGradient(
+                b.left.toFloat(), b.bottom.toFloat(), b.right.toFloat(), b.top.toFloat(),
+                intArrayOf(0xffff7777.toInt(), 0xffed1b36.toInt(), 0xffa90024.toInt()),
+                floatArrayOf(0f, 0.48f, 1f), Shader.TileMode.CLAMP,
+            )
+            canvas.drawRoundRect(RectF(b.left + inset, b.top + inset, b.right - inset, b.bottom - inset), radius, radius, paint)
+        }
+        override fun setAlpha(alpha: Int) { paint.alpha = alpha; invalidateSelf() }
+        override fun setColorFilter(colorFilter: android.graphics.ColorFilter?) { paint.colorFilter = colorFilter; invalidateSelf() }
+        @Deprecated("Deprecated in Android")
+        override fun getOpacity(): Int = android.graphics.PixelFormat.TRANSLUCENT
     }
     private fun weight(w: Float): LinearLayout.LayoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, w)
     private fun dp(n: Int): Int = (resources.displayMetrics.density * n).toInt()

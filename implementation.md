@@ -15,6 +15,7 @@ All implementation and build files live in `/Users/bharath/gitprojects/stblab-gu
 
 - Genre and channel columns with counts, dummy and redirect numbers, 11-item paging, wraparound selection, and per-genre channel-position memory.
 - The picker keeps an 11-row channel viewport; genre and channel focus use a visible ring, and redirect numbers stay in a right-aligned final column.
+- The TV launcher identifies this as **StbLab Picker**, with a Leanback banner and a package ID distinct from the reference app.
 - Show the virtual ⭐ Favorites genre first when there are favorites.
 - Keep the NumPad collapsed by default; when opened, it provides digits, CH ▲/▼, Favorites, Recall, and OK.
 - Preserve physical remote navigation, digit dialing, Favorites keycode 177, Recall keycode 229, and CH+/CH− stepping.
