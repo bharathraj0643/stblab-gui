@@ -34,6 +34,7 @@ class MainActivity : Activity() {
     private val main = Handler(Looper.getMainLooper())
     private val io = Executors.newCachedThreadPool()
     private var page = "picker"
+    private var renderedPage = ""
     private var settingsSection = ""
     private var genres: List<GenreDto> = emptyList()
     private var genreIndex = 0
@@ -72,6 +73,7 @@ class MainActivity : Activity() {
     private var pairingCodeInput: EditText? = null
     private var pairingDiscoveryStatus: TextView? = null
     private var pairingDiscoveryResults: LinearLayout? = null
+    private val pairingDeviceRows = linkedMapOf<String, Button>()
     private var pairingRemoteStatus: TextView? = null
     private var pairingFindButton: Button? = null
     private var pairingButton: Button? = null
@@ -118,7 +120,15 @@ class MainActivity : Activity() {
         if (hasFocus) hideSystemChrome()
     }
 
-    override fun onResume() { super.onResume(); if (::remote.isInitialized) { if (page == "picker") renderPicker() else renderSettings() } }
+    override fun onResume() {
+        super.onResume()
+        if (!::remote.isInitialized) return
+        if (renderedPage != page) {
+            if (page == "picker") renderPicker() else renderSettings()
+        } else {
+            refreshStatusViews()
+        }
+    }
     override fun onDestroy() {
         activeDiscovery?.stop()
         discoveryExecutor.shutdownNow()
@@ -195,7 +205,16 @@ class MainActivity : Activity() {
         return if (favorites.isEmpty()) genres else listOf(GenreDto(-1, "⭐ Favorites", -1, favorites)) + genres
     }
     private fun currentGenre(): GenreDto? = displayGenres().getOrNull(genreIndex)
-    private fun currentChannels(): List<ChannelDto> = currentGenre()?.channels.orEmpty().sortedWith(compareBy<ChannelDto> { it.sortOrder }.thenBy { it.id })
+    private fun currentChannels(): List<ChannelDto> {
+        val genre = currentGenre() ?: return emptyList()
+        // Favorites is a synthetic genre. Its channel position comes from
+        // favoriteOrder, while real genres use their own channel sortOrder.
+        return if (genre.id == FAVORITES_GENRE_ID) {
+            genre.channels.sortedWith(compareBy<ChannelDto> { it.favoriteOrder }.thenBy { it.id })
+        } else {
+            genre.channels.sortedWith(compareBy<ChannelDto> { it.sortOrder }.thenBy { it.id })
+        }
+    }
     private fun jumpGenre(index: Int) {
         val old = currentGenre()?.id
         if (old != null) selectedByGenre[old] = channelIndex
@@ -464,6 +483,7 @@ class MainActivity : Activity() {
         root.addView(sidebar, LinearLayout.LayoutParams(0, -1, 1f))
 
         setContentView(root)
+        renderedPage = "picker"
         val desiredFocus = focusRestoreId
         main.post {
             val restored = if (desiredFocus != View.NO_ID) findViewById<View>(desiredFocus)?.requestFocus() == true else false
@@ -1051,6 +1071,7 @@ class MainActivity : Activity() {
             else -> helpPage(root)
         }
         setContentView(ScrollView(this).apply { isFillViewport = true; addView(root) })
+        renderedPage = page
         if (page == "pairing") {
             pairingFindButton?.post { if (page == "pairing") pairingFindButton?.requestFocus() }
         }
@@ -1076,7 +1097,9 @@ class MainActivity : Activity() {
         val snapshot = remote.snapshot()
         root.addView(label("AIRTEL BOX PAIRING", 14, GREEN, true))
 
-        val host = editField("Airtel box IP address or host name", remote.savedHost())
+        val host = editField("Airtel box IP address or host name", remote.savedHost()).apply {
+            id = View.generateViewId()
+        }
         pairingHostInput = host
         root.addView(host)
 
@@ -1104,6 +1127,7 @@ class MainActivity : Activity() {
         root.addView(discoveryStatus)
         val results = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         pairingDiscoveryResults = results
+        pairingDeviceRows.clear()
         root.addView(results)
 
         val remoteStatus = label(pairingStatusText(snapshot), 17, if (snapshot.connected) GREEN else AMBER)
@@ -1131,9 +1155,13 @@ class MainActivity : Activity() {
 
         host.nextFocusDownId = find.id
         pair.nextFocusDownId = code.id
+        pair.nextFocusUpId = find.id
         reconnect.nextFocusDownId = code.id
+        reconnect.nextFocusUpId = host.id
         code.nextFocusUpId = pair.id
         code.nextFocusDownId = confirm.id
+        confirm.nextFocusUpId = code.id
+        updatePairingFocusOrder()
         root.addView(label("Start pairing here, then enter the code displayed by the Airtel box. Credentials are stored privately on this TV.", 14, MUTED))
     }
 
@@ -1152,13 +1180,16 @@ class MainActivity : Activity() {
         val results = pairingDiscoveryResults ?: return
         val status = pairingDiscoveryStatus ?: return
         results.removeAllViews()
+        pairingDeviceRows.clear()
+        updatePairingFocusOrder()
         status.text = "Searching with mDNS and local network scan…"
         val scan = Discovery(this) { boxes, done ->
             runOnUiThread {
                 if (isFinishing || isDestroyed || activeDiscovery == null) return@runOnUiThread
-                results.removeAllViews()
                 boxes.take(12).forEach { box ->
+                    if (pairingDeviceRows.containsKey(box.ip)) return@forEach
                     val resultButton = button("${box.name}  ·  ${box.ip}") {}.apply {
+                        id = View.generateViewId()
                         contentDescription = "Use ${box.ip} for Airtel box pairing"
                         setOnClickListener {
                             val host = pairingHostInput ?: return@setOnClickListener
@@ -1169,8 +1200,9 @@ class MainActivity : Activity() {
                         }
                     }
                     results.addView(resultButton)
-                    resultButton.nextFocusDownId = pairingButton?.id ?: View.NO_ID
+                    pairingDeviceRows[box.ip] = resultButton
                 }
+                updatePairingFocusOrder()
                 status.text = when {
                     done && boxes.isEmpty() -> "No boxes found. Check the same Wi-Fi/LAN or enter the IP manually."
                     done -> "Found ${boxes.size} device${if (boxes.size == 1) "" else "s"}. Select one or enter an IP manually."
@@ -1183,6 +1215,31 @@ class MainActivity : Activity() {
         discoveryExecutor.execute {
             scan.start()
             runOnUiThread { if (activeDiscovery === scan) activeDiscovery = null }
+        }
+    }
+
+    private fun updatePairingFocusOrder() {
+        val find = pairingFindButton ?: return
+        val pair = pairingButton ?: return
+        val host = pairingHostInput ?: return
+        val code = pairingCodeInput ?: return
+        val confirm = pairingConfirmButton ?: return
+        val reconnect = pairingReconnectButton ?: return
+        val deviceRows = pairingDeviceRows.values.toList()
+
+        host.nextFocusDownId = find.id
+        find.nextFocusDownId = deviceRows.firstOrNull()?.id ?: pair.id
+        pair.nextFocusUpId = deviceRows.lastOrNull()?.id ?: find.id
+        pair.nextFocusDownId = code.id
+        reconnect.nextFocusUpId = host.id
+        reconnect.nextFocusDownId = code.id
+        code.nextFocusUpId = pair.id
+        code.nextFocusDownId = confirm.id
+        confirm.nextFocusUpId = code.id
+
+        deviceRows.forEachIndexed { index, row ->
+            row.nextFocusUpId = if (index == 0) find.id else deviceRows[index - 1].id
+            row.nextFocusDownId = if (index == deviceRows.lastIndex) pair.id else deviceRows[index + 1].id
         }
     }
 
@@ -1482,6 +1539,7 @@ class MainActivity : Activity() {
 
     companion object {
         private const val PAGE_SIZE = 11
+        private const val FAVORITES_GENRE_ID = -1
         private const val GENRE_ID_BASE = 10000
         private const val CHANNEL_ID_BASE = 20000
         private const val SETTINGS_BUTTON_ID = 30001
