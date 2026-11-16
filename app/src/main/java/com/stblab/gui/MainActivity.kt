@@ -56,6 +56,10 @@ class MainActivity : Activity() {
     private var pairingDiscoveryLabel: TextView? = null
     private var pairingDeviceList: LinearLayout? = null
     private val pairingDeviceRows = linkedMapOf<String, Button>()
+    private var pairingFindButton: Button? = null
+    private var pairingPairButton: Button? = null
+    private var pairingReconnectButton: Button? = null
+    private var pairingConfirmButton: Button? = null
     private var selectedEditGenre = 0
     private var focusedArea = "channels"
     private var editFavorites = false
@@ -430,11 +434,26 @@ class MainActivity : Activity() {
             gravity = Gravity.END or Gravity.CENTER_VERTICAL
             setPadding(0, dp(12), 0, 0)
         }
-        footer.addView(button("⚙  SETTINGS") {
+        val settingsButton = button("⚙  SETTINGS") {
             focusRestoreId = SETTINGS_BUTTON_ID
             page = "settings"
             renderSettings()
-        }.apply { id = SETTINGS_BUTTON_ID })
+        }.apply { id = SETTINGS_BUTTON_ID }
+        val closeButton = button("⏻  CLOSE APP") {
+            activeDiscovery?.stop()
+            finishAndRemoveTask()
+        }.apply {
+            id = CLOSE_APP_BUTTON_ID
+            textSize = 11f
+            setPadding(dp(8), dp(6), dp(8), dp(6))
+            nextFocusLeftId = SETTINGS_BUTTON_ID
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                marginStart = dp(8)
+            }
+        }
+        settingsButton.nextFocusRightId = CLOSE_APP_BUTTON_ID
+        footer.addView(settingsButton)
+        footer.addView(closeButton)
         sidebar.addView(footer)
         root.addView(sidebar, LinearLayout.LayoutParams(0, -1, 1f))
 
@@ -1047,11 +1066,23 @@ class MainActivity : Activity() {
         val snap = remote.snapshot()
         root.addView(label("AIRTEL BOX PAIRING", 14, GREEN, true))
         val host = editField("Airtel box IP address or host name", remote.savedHost()).also { hostField = it }
+        host.id = View.generateViewId()
         root.addView(host)
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        row.addView(button("FIND AIRTEL BOX") { discoverBoxes() }, weight(1f))
-        row.addView(button("PAIR WITH AIRTEL") { startPairing(host.text.toString()) }, weight(1f))
-        row.addView(button("RECONNECT") { remote.connect(); renderSettings() }, weight(1f))
+        val findButton = button("FIND AIRTEL BOX") { discoverBoxes() }.apply { id = View.generateViewId() }
+        val pairButton = button("PAIR WITH AIRTEL") { startPairing(host.text.toString()) }.apply { id = View.generateViewId() }
+        val reconnectButton = button("RECONNECT") { remote.connect(); renderSettings() }.apply { id = View.generateViewId() }
+        pairingFindButton = findButton
+        pairingPairButton = pairButton
+        pairingReconnectButton = reconnectButton
+        findButton.nextFocusRightId = pairButton.id
+        pairButton.nextFocusLeftId = findButton.id
+        pairButton.nextFocusRightId = reconnectButton.id
+        reconnectButton.nextFocusLeftId = pairButton.id
+        host.nextFocusDownId = findButton.id
+        row.addView(findButton, weight(1f))
+        row.addView(pairButton, weight(1f))
+        row.addView(reconnectButton, weight(1f))
         root.addView(row)
         pairingDiscoveryLabel = label(discoveryText, 15, MUTED).also(root::addView)
         pairingDeviceRows.clear()
@@ -1066,13 +1097,25 @@ class MainActivity : Activity() {
         }, 18, if (snap.connected) GREEN else AMBER)
         pairingStatusLabel = statusLabel
         root.addView(statusLabel)
-        val code = editField("6-character code shown on Airtel TV", "").apply { inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS; filters = arrayOf(android.text.InputFilter.LengthFilter(6)); codeField = this }
+        val code = editField("6-character code shown on Airtel TV", "").apply {
+            id = View.generateViewId()
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
+            filters = arrayOf(android.text.InputFilter.LengthFilter(6))
+            codeField = this
+        }
         root.addView(code)
-        root.addView(button("CONFIRM PAIRING CODE") {
+        val confirmButton = button("CONFIRM PAIRING CODE") {
             try { remote.finishPair(code.text.toString()); code.text.clear(); showMessage("Pairing code submitted") }
             catch (e: Throwable) { showMessage(e.message ?: "Pairing failed") }
-        })
+        }.apply { id = View.generateViewId() }
+        pairingConfirmButton = confirmButton
+        pairButton.nextFocusDownId = code.id
+        reconnectButton.nextFocusDownId = code.id
+        code.nextFocusUpId = pairButton.id
+        code.nextFocusDownId = confirmButton.id
+        root.addView(confirmButton)
         root.addView(label("Pairing credentials and the Airtel certificate fingerprint stay in private app storage.", 14, MUTED))
+        findButton.post { if (page == "pairing") findButton.requestFocus() }
     }
     private fun remotePage(root: LinearLayout) {
         root.addView(label("Send commands to the paired Airtel box. Remote controls require an active connection.", 15, MUTED))
@@ -1151,10 +1194,14 @@ class MainActivity : Activity() {
                 }
                 discoveryText = "Selected ${box.name} at ${box.ip}. Choose PAIR WITH AIRTEL."
                 pairingDiscoveryLabel?.text = discoveryText
+                pairingPairButton?.requestFocus()
             }
+            row.nextFocusDownId = pairingPairButton?.id ?: View.NO_ID
             pairingDeviceRows[box.ip] = row
             container.addView(row)
         }
+        val firstResultId = pairingDeviceRows.values.firstOrNull()?.id
+        pairingFindButton?.nextFocusDownId = firstResultId ?: pairingPairButton?.id ?: View.NO_ID
     }
 
     private fun editPage(root: LinearLayout) {
@@ -1403,6 +1450,7 @@ class MainActivity : Activity() {
         private const val CHANNEL_ID_BASE = 20000
         private const val SETTINGS_BUTTON_ID = 30001
         private const val KEYPAD_TOGGLE_ID = 30002
+        private const val CLOSE_APP_BUTTON_ID = 30003
         private const val KEYPAD_BUTTON_BASE = 31000
         private const val KEYPAD_FAVORITES_ID = 31020
         private const val KEYPAD_RECALL_ID = 31021
