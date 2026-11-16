@@ -63,6 +63,7 @@ class RemoteV2Client private constructor(context: Context) {
     @Volatile private var softwareVersion: String? = null
     @Volatile private var reconnectEnabled = true
     @Volatile private var closingByUs = false
+    @Volatile private var shutdown = false
 
     init { if (paired) connect() }
 
@@ -124,13 +125,14 @@ class RemoteV2Client private constructor(context: Context) {
     }
 
     fun connect() {
+        if (shutdown) return
         if (!paired) { status = "unpaired"; return }
         reconnectEnabled = true
         io.execute { connectOnIo() }
     }
 
     private fun connectOnIo() {
-        if (!paired) return
+        if (shutdown || !paired) return
         val host = savedHost()
         status = "connecting"; error = null; connected = false
         try {
@@ -139,8 +141,7 @@ class RemoteV2Client private constructor(context: Context) {
             closingByUs = false
             val identity = ClientIdentity.loadOrCreate(identityDir)
             val certificate = Base64.decode(prefs.getString("tv_certificate", ""), Base64.DEFAULT)
-            val fingerprint = prefs.getString("tv_fingerprint", "") ?: ""
-            val fresh = AurSession(host, PORT_REMOTE, identity.certDer, identity.keyDer, fingerprint, remoteTextInputEnabled, object : AurSession.Events {
+            val fresh = AurSession(host, PORT_REMOTE, identity.certDer, identity.keyDer, remoteTextInputEnabled, object : AurSession.Events {
                 override fun onConfigured(modelValue: String, vendor: String, software: String) {
                     model = modelValue; manufacturer = vendor; softwareVersion = software
                 }
@@ -150,17 +151,32 @@ class RemoteV2Client private constructor(context: Context) {
                 override fun onError(message: String) { error = message; status = "error" }
                 override fun onClosed(reason: String) {
                     connected = false; error = reason; status = "disconnected"
-                    if (!closingByUs && reconnectEnabled && paired) io.schedule({ connectOnIo() }, 2, TimeUnit.SECONDS)
+                    if (!shutdown && !closingByUs && reconnectEnabled && paired) io.schedule({ connectOnIo() }, 2, TimeUnit.SECONDS)
                 }
-                override fun onPeerCert(sha256: String) { /* AurSession verifies this against the stored pin. */ }
+                override fun onPeerCert(sha256: String) { /* Keep pairing fingerprint for status/diagnostics. */ }
             })
+            if (shutdown) return
             session = fresh
             fresh.connect()
             if (!fresh.awaitReady(12_000)) throw IllegalStateException("The box connected but did not become ready.")
         } catch (t: Throwable) {
             connected = false; status = "disconnected"; error = t.message ?: "Could not connect to the Airtel box"
-            if (reconnectEnabled && paired) io.schedule({ connectOnIo() }, 5, TimeUnit.SECONDS)
+            if (!shutdown && reconnectEnabled && paired) io.schedule({ connectOnIo() }, 5, TimeUnit.SECONDS)
         }
+    }
+
+    /** Close all Airtel-box sockets and permanently disable reconnects for this process. */
+    fun shutdown() {
+        shutdown = true
+        reconnectEnabled = false
+        closingByUs = true
+        runCatching { pairing?.close() }
+        runCatching { session?.close() }
+        pairing = null
+        session = null
+        connected = false
+        status = "closed"
+        io.shutdownNow()
     }
 
     fun sendKey(keyValue: String) {

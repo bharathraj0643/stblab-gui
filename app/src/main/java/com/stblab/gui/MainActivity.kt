@@ -146,6 +146,19 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun closeApp() {
+        activeDiscovery?.stop()
+        activeDiscovery = null
+        dialTask?.let(main::removeCallbacks)
+        channelStepTask?.let(main::removeCallbacks)
+        main.removeCallbacksAndMessages(null)
+        discoveryExecutor.shutdownNow()
+        io.shutdownNow()
+        if (::remote.isInitialized) remote.shutdown()
+        finishAndRemoveTask()
+        android.os.Process.killProcess(android.os.Process.myPid())
+    }
+
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (page == "picker" && event.action == KeyEvent.ACTION_DOWN) {
             val isChannelStep = event.keyCode == KeyEvent.KEYCODE_CHANNEL_UP || event.keyCode == KeyEvent.KEYCODE_PAGE_UP ||
@@ -466,7 +479,7 @@ class MainActivity : Activity() {
             renderSettings()
         }.apply { id = SETTINGS_BUTTON_ID }
         val closeButton = button("⏻  CLOSE APP") {
-            finishAndRemoveTask()
+            closeApp()
         }.apply {
             id = CLOSE_APP_BUTTON_ID
             textSize = 11f
