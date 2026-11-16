@@ -48,18 +48,6 @@ class MainActivity : Activity() {
     private var lastTuned = ""
     private var tuningStatus = ""
     private var dialogError = ""
-    private var activeDiscovery: Discovery? = null
-    private var boxes: List<Discovery.Box> = emptyList()
-    private var discoveryText = "Scan to find Android TV Remote devices on this network."
-    private var hostField: EditText? = null
-    private var codeField: EditText? = null
-    private var pairingDiscoveryLabel: TextView? = null
-    private var pairingDeviceList: LinearLayout? = null
-    private val pairingDeviceRows = linkedMapOf<String, Button>()
-    private var pairingFindButton: Button? = null
-    private var pairingPairButton: Button? = null
-    private var pairingReconnectButton: Button? = null
-    private var pairingConfirmButton: Button? = null
     private var selectedEditGenre = 0
     private var focusedArea = "channels"
     private var editFavorites = false
@@ -80,7 +68,19 @@ class MainActivity : Activity() {
     private var pickerPrevArrow: TextView? = null
     private var pickerNextArrow: TextView? = null
     private var settingsRemoteLabel: TextView? = null
-    private var pairingStatusLabel: TextView? = null
+    private var pairingHostInput: EditText? = null
+    private var pairingCodeInput: EditText? = null
+    private var pairingDiscoveryStatus: TextView? = null
+    private var pairingDiscoveryResults: LinearLayout? = null
+    private var pairingRemoteStatus: TextView? = null
+    private var pairingFindButton: Button? = null
+    private var pairingButton: Button? = null
+    private var pairingReconnectButton: Button? = null
+    private var pairingConfirmButton: Button? = null
+    @Volatile private var activeDiscovery: Discovery? = null
+    private val discoveryExecutor = Executors.newSingleThreadExecutor { task ->
+        Thread(task, "StbLabDiscovery").apply { isDaemon = true }
+    }
     private val poll = object : Runnable {
         override fun run() {
             if (!isFinishing && !isDestroyed) {
@@ -119,7 +119,14 @@ class MainActivity : Activity() {
     }
 
     override fun onResume() { super.onResume(); if (::remote.isInitialized) { if (page == "picker") renderPicker() else renderSettings() } }
-    override fun onDestroy() { activeDiscovery?.stop(); dialTask?.let(main::removeCallbacks); main.removeCallbacksAndMessages(null); io.shutdownNow(); super.onDestroy() }
+    override fun onDestroy() {
+        activeDiscovery?.stop()
+        discoveryExecutor.shutdownNow()
+        dialTask?.let(main::removeCallbacks)
+        main.removeCallbacksAndMessages(null)
+        io.shutdownNow()
+        super.onDestroy()
+    }
 
     override fun onBackPressed() {
         when {
@@ -440,7 +447,6 @@ class MainActivity : Activity() {
             renderSettings()
         }.apply { id = SETTINGS_BUTTON_ID }
         val closeButton = button("⏻  CLOSE APP") {
-            activeDiscovery?.stop()
             finishAndRemoveTask()
         }.apply {
             id = CLOSE_APP_BUTTON_ID
@@ -1045,6 +1051,9 @@ class MainActivity : Activity() {
             else -> helpPage(root)
         }
         setContentView(ScrollView(this).apply { isFillViewport = true; addView(root) })
+        if (page == "pairing") {
+            pairingFindButton?.post { if (page == "pairing") pairingFindButton?.requestFocus() }
+        }
     }
 
     private fun settingsHome(root: LinearLayout) {
@@ -1062,61 +1071,144 @@ class MainActivity : Activity() {
         root.addView(button("HELP & ABOUT") { page = "help"; renderSettings() })
     }
 
+    /** Pairing screen follows the reference app's TV-remote focus order. */
     private fun pairingPage(root: LinearLayout) {
-        val snap = remote.snapshot()
+        val snapshot = remote.snapshot()
         root.addView(label("AIRTEL BOX PAIRING", 14, GREEN, true))
-        val host = editField("Airtel box IP address or host name", remote.savedHost()).also { hostField = it }
-        host.id = View.generateViewId()
+
+        val host = editField("Airtel box IP address or host name", remote.savedHost())
+        pairingHostInput = host
         root.addView(host)
-        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        val findButton = button("FIND AIRTEL BOX") { discoverBoxes() }.apply { id = View.generateViewId() }
-        val pairButton = button("PAIR WITH AIRTEL") { startPairing(host.text.toString()) }.apply { id = View.generateViewId() }
-        val reconnectButton = button("RECONNECT") { remote.connect(); renderSettings() }.apply { id = View.generateViewId() }
-        pairingFindButton = findButton
-        pairingPairButton = pairButton
-        pairingReconnectButton = reconnectButton
-        findButton.nextFocusRightId = pairButton.id
-        pairButton.nextFocusLeftId = findButton.id
-        pairButton.nextFocusRightId = reconnectButton.id
-        reconnectButton.nextFocusLeftId = pairButton.id
-        host.nextFocusDownId = findButton.id
-        row.addView(findButton, weight(1f))
-        row.addView(pairButton, weight(1f))
-        row.addView(reconnectButton, weight(1f))
-        root.addView(row)
-        pairingDiscoveryLabel = label(discoveryText, 15, MUTED).also(root::addView)
-        pairingDeviceRows.clear()
-        pairingDeviceList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        root.addView(pairingDeviceList)
-        updatePairingDeviceRows()
-        val statusLabel = label(when {
-            snap.status == "waiting_code" -> snap.error ?: "Airtel box is showing a pairing code. Enter it below."
-            snap.connected -> "Connected to ${snap.model ?: snap.host}${snap.currentApp?.let { " · $it" } ?: ""}"
-            snap.error != null -> "${snap.status}: ${snap.error}"
-            else -> "Remote: ${snap.status}${snap.host.takeIf { it.isNotBlank() }?.let { " · $it" } ?: ""}"
-        }, 18, if (snap.connected) GREEN else AMBER)
-        pairingStatusLabel = statusLabel
-        root.addView(statusLabel)
+
+        val actions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val find = button("FIND AIRTEL BOX") { discoverBoxes() }.apply { id = View.generateViewId() }
+        val pair = button("PAIR WITH AIRTEL") { startPairing() }.apply { id = View.generateViewId() }
+        val reconnect = button("RECONNECT") { remote.connect() }.apply { id = View.generateViewId() }
+        pairingFindButton = find
+        pairingButton = pair
+        pairingReconnectButton = reconnect
+        find.nextFocusRightId = pair.id
+        pair.nextFocusLeftId = find.id
+        pair.nextFocusRightId = reconnect.id
+        reconnect.nextFocusLeftId = pair.id
+        actions.addView(find, weight(1f))
+        actions.addView(pair, weight(1f))
+        actions.addView(reconnect, weight(1f))
+        root.addView(actions)
+
+        val discoveryStatus = label("Scan to find Android TV Remote devices on this network.", 14, MUTED)
+        pairingDiscoveryStatus = discoveryStatus
+        root.addView(discoveryStatus)
+        val results = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        pairingDiscoveryResults = results
+        root.addView(results)
+
+        val remoteStatus = label(pairingStatusText(snapshot), 17, if (snapshot.connected) GREEN else AMBER)
+        pairingRemoteStatus = remoteStatus
+        root.addView(remoteStatus)
+
+        val imeToggle = button(remoteTextInputLabel()) {}
+        imeToggle.setOnClickListener {
+            remote.setRemoteTextInputEnabled(!remote.remoteTextInputEnabled)
+            imeToggle.text = remoteTextInputLabel()
+        }
+        root.addView(imeToggle)
+        root.addView(label("Remote text input can conflict with third-party keyboard services such as tvQuickActions Gamepad. Leave disabled unless you use this app's text injection.", 13, MUTED))
+
         val code = editField("6-character code shown on Airtel TV", "").apply {
             id = View.generateViewId()
             inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
             filters = arrayOf(android.text.InputFilter.LengthFilter(6))
-            codeField = this
         }
+        pairingCodeInput = code
         root.addView(code)
-        val confirmButton = button("CONFIRM PAIRING CODE") {
-            try { remote.finishPair(code.text.toString()); code.text.clear(); showMessage("Pairing code submitted") }
-            catch (e: Throwable) { showMessage(e.message ?: "Pairing failed") }
-        }.apply { id = View.generateViewId() }
-        pairingConfirmButton = confirmButton
-        pairButton.nextFocusDownId = code.id
-        reconnectButton.nextFocusDownId = code.id
-        code.nextFocusUpId = pairButton.id
-        code.nextFocusDownId = confirmButton.id
-        root.addView(confirmButton)
-        root.addView(label("Pairing credentials and the Airtel certificate fingerprint stay in private app storage.", 14, MUTED))
-        findButton.post { if (page == "pairing") findButton.requestFocus() }
+        val confirm = button("CONFIRM PAIRING CODE") { confirmPairing() }.apply { id = View.generateViewId() }
+        pairingConfirmButton = confirm
+        root.addView(confirm)
+
+        host.nextFocusDownId = find.id
+        pair.nextFocusDownId = code.id
+        reconnect.nextFocusDownId = code.id
+        code.nextFocusUpId = pair.id
+        code.nextFocusDownId = confirm.id
+        root.addView(label("Start pairing here, then enter the code displayed by the Airtel box. Credentials are stored privately on this TV.", 14, MUTED))
     }
+
+    private fun pairingStatusText(state: com.xstream.remote.RemoteSnapshot): String = when {
+        state.status == "waiting_code" -> state.error ?: "Airtel box is showing a pairing code. Enter it below."
+        state.connected -> "Connected to ${state.model ?: state.host}${state.currentApp?.let { " · $it" } ?: ""}"
+        state.error != null -> "${state.status}: ${state.error}"
+        else -> "Remote: ${state.status}${state.host.takeIf { it.isNotBlank() }?.let { " · $it" } ?: ""}"
+    }
+
+    private fun remoteTextInputLabel(): String = if (remote.remoteTextInputEnabled)
+        "REMOTE TEXT INPUT: ON" else "REMOTE TEXT INPUT: OFF · GAMEPAD SAFE"
+
+    private fun discoverBoxes() {
+        if (activeDiscovery != null) return
+        val results = pairingDiscoveryResults ?: return
+        val status = pairingDiscoveryStatus ?: return
+        results.removeAllViews()
+        status.text = "Searching with mDNS and local network scan…"
+        val scan = Discovery(this) { boxes, done ->
+            runOnUiThread {
+                if (isFinishing || isDestroyed || activeDiscovery == null) return@runOnUiThread
+                results.removeAllViews()
+                boxes.take(12).forEach { box ->
+                    val resultButton = button("${box.name}  ·  ${box.ip}") {}.apply {
+                        contentDescription = "Use ${box.ip} for Airtel box pairing"
+                        setOnClickListener {
+                            val host = pairingHostInput ?: return@setOnClickListener
+                            host.setText(box.ip)
+                            host.setSelection(host.text.length)
+                            status.text = "Selected ${box.name} at ${box.ip}. Choose PAIR WITH AIRTEL."
+                            pairingButton?.requestFocus()
+                        }
+                    }
+                    results.addView(resultButton)
+                    resultButton.nextFocusDownId = pairingButton?.id ?: View.NO_ID
+                }
+                status.text = when {
+                    done && boxes.isEmpty() -> "No boxes found. Check the same Wi-Fi/LAN or enter the IP manually."
+                    done -> "Found ${boxes.size} device${if (boxes.size == 1) "" else "s"}. Select one or enter an IP manually."
+                    boxes.isNotEmpty() -> "Found ${boxes.size} device${if (boxes.size == 1) "" else "s"}… still searching."
+                    else -> "Searching with mDNS and local network scan…"
+                }
+            }
+        }
+        activeDiscovery = scan
+        discoveryExecutor.execute {
+            scan.start()
+            runOnUiThread { if (activeDiscovery === scan) activeDiscovery = null }
+        }
+    }
+
+    private fun startPairing() {
+        try {
+            remote.startPair(pairingHostInput?.text?.toString().orEmpty())
+            val code = pairingCodeInput ?: return
+            code.post {
+                code.requestFocus()
+                (getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)
+                    ?.showSoftInput(code, InputMethodManager.SHOW_IMPLICIT)
+            }
+        } catch (error: Throwable) {
+            pairingRemoteStatus?.text = error.message ?: "Could not start pairing"
+        }
+    }
+
+    private fun confirmPairing() {
+        try {
+            remote.finishPair(pairingCodeInput?.text?.toString().orEmpty())
+            pairingCodeInput?.text?.clear()
+        } catch (error: Throwable) {
+            pairingRemoteStatus?.text = error.message ?: "Pairing failed"
+        }
+    }
+
     private fun remotePage(root: LinearLayout) {
         root.addView(label("Send commands to the paired Airtel box. Remote controls require an active connection.", 15, MUTED))
         fun key(label: String, command: String): Button = button(label) { sendRemoteKey(command) }
@@ -1154,56 +1246,6 @@ class MainActivity : Activity() {
             catch (e: Throwable) { main.post { showMessage(e.message ?: "Remote command failed") } }
         }
     }
-    private fun startPairing(host: String) {
-        try {
-            remote.startPair(host)
-            val field = codeField
-            field?.post { field.requestFocus(); showKeyboard(field) }
-            showMessage("Pairing started. Enter the code shown on the Airtel box.")
-        }
-        catch (e: Throwable) { showMessage(e.message ?: "Could not start pairing") }
-    }
-    private fun discoverBoxes() {
-        if (activeDiscovery != null) return
-        boxes = emptyList()
-        discoveryText = "Searching with mDNS and local network scan…"
-        pairingDiscoveryLabel?.text = discoveryText
-        updatePairingDeviceRows()
-        val scan = Discovery(this) { results, done -> main.post {
-            boxes = results.take(12)
-            discoveryText = when { done && results.isEmpty() -> "No boxes found. Check same Wi-Fi/LAN or enter an IP manually."; done -> "Found ${results.size} device(s). Select one or enter an IP manually."; else -> "Searching…" }
-            pairingDiscoveryLabel?.text = discoveryText
-            updatePairingDeviceRows()
-        } }
-        activeDiscovery = scan
-        io.execute { scan.start(); activeDiscovery = null }
-    }
-
-    private fun updatePairingDeviceRows() {
-        val container = pairingDeviceList ?: return
-        val visibleIps = boxes.map { it.ip }.toSet()
-        pairingDeviceRows.keys.filterNot { it in visibleIps }.toList().forEach { ip ->
-            container.removeView(pairingDeviceRows.remove(ip))
-        }
-        boxes.forEach { box ->
-            if (pairingDeviceRows.containsKey(box.ip)) return@forEach
-            val row = button("${box.name} · ${box.ip}") {
-                hostField?.let { field ->
-                    field.setText(box.ip)
-                    field.setSelection(field.text.length)
-                }
-                discoveryText = "Selected ${box.name} at ${box.ip}. Choose PAIR WITH AIRTEL."
-                pairingDiscoveryLabel?.text = discoveryText
-                pairingPairButton?.requestFocus()
-            }
-            row.nextFocusDownId = pairingPairButton?.id ?: View.NO_ID
-            pairingDeviceRows[box.ip] = row
-            container.addView(row)
-        }
-        val firstResultId = pairingDeviceRows.values.firstOrNull()?.id
-        pairingFindButton?.nextFocusDownId = firstResultId ?: pairingPairButton?.id ?: View.NO_ID
-    }
-
     private fun editPage(root: LinearLayout) {
         reloadGenres()
         val favs = genres.flatMap { it.channels }.filter { it.isFavorite }.sortedBy { it.favoriteOrder }
@@ -1335,20 +1377,14 @@ class MainActivity : Activity() {
             it.text = "Remote ${if (state.connected) "Connected to ${state.model ?: state.host}" else state.status + (state.error?.let { message -> " · $message" } ?: "")}"
             it.setTextColor(if (state.connected) GREEN else AMBER)
         }
-        pairingStatusLabel?.let {
-            it.text = when {
-                state.status == "waiting_code" -> state.error ?: "Airtel box is showing a pairing code. Enter it below."
-                state.connected -> "Connected to ${state.model ?: state.host}${state.currentApp?.let { app -> " · $app" } ?: ""}"
-                state.error != null -> "${state.status}: ${state.error}"
-                else -> "Remote: ${state.status}${state.host.takeIf { host -> host.isNotBlank() }?.let { host -> " · $host" } ?: ""}"
-            }
+        pairingRemoteStatus?.let {
+            it.text = pairingStatusText(state)
             it.setTextColor(if (state.connected) GREEN else AMBER)
         }
     }
 
     private fun confirm(message: String, action: () -> Unit) { AlertDialog.Builder(this).setMessage(message).setNegativeButton("Cancel", null).setPositiveButton("Confirm") { _, _ -> action() }.show() }
     private fun showMessage(message: String) { Toast.makeText(this, message, Toast.LENGTH_LONG).show() }
-    private fun showKeyboard(field: EditText?) { field?.post { (getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)?.showSoftInput(field, InputMethodManager.SHOW_IMPLICIT) } }
     private fun numberField(hintValue: String, value: Int?): EditText = editField(hintValue, value?.toString() ?: "").apply { inputType = android.text.InputType.TYPE_CLASS_NUMBER }
     private fun editField(hintValue: String, value: String): EditText = EditText(this).apply {
         hint = hintValue; setText(value); textSize = 14f; setTextColor(TEXT); setHintTextColor(MUTED); setSingleLine(true); setBackground(panel(false)); setPadding(dp(12), dp(8), dp(12), dp(8))
