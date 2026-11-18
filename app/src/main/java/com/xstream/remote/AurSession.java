@@ -417,7 +417,6 @@ final class AurSession {
             out.flush();
         }
     }
-    }
 
     private void closeQuietly() {
         SSLSocket ssl = socket;
