@@ -125,15 +125,17 @@ class RemoteV2Client private constructor(context: Context) {
         io.execute { try { current.finish(clean) } catch (t: Throwable) { error = t.message ?: "Pairing code was rejected"; status = "waiting_code" } }
     }
 
-    fun connect() {
+    fun connect(force: Boolean = false) {
         if (shutdown) return
         if (!paired) { status = "unpaired"; return }
+        if (!force && connected && session?.isReady == true) return
         reconnectEnabled = true
-        io.execute { connectOnIo() }
+        io.execute { connectOnIo(force) }
     }
 
-    private fun connectOnIo() {
+    private fun connectOnIo(force: Boolean = false) {
         if (shutdown || !paired) return
+        if (!force && connected && session?.isReady == true) return
         val host = savedHost()
         status = "connecting"; error = null; connected = false
         try {
@@ -148,7 +150,7 @@ class RemoteV2Client private constructor(context: Context) {
                 }
                 override fun onReady(started: Boolean, rttMillis: Long) {
                     isOn = started; connected = true; status = "connected"; error = null
-                    reconnectBackoffMs = 2_000L  // reset backoff after a successful handshake
+                    reconnectBackoffMs = 1_000L  // reset backoff after a successful handshake
                 }
                 override fun onVolume(level: Int, max: Int, mutedValue: Boolean) { volumeLevel = level; volumeMax = max; muted = mutedValue }
                 override fun onApp(packageName: String) { currentApp = packageName }
@@ -176,9 +178,9 @@ class RemoteV2Client private constructor(context: Context) {
     }
 
     private fun scheduleReconnect() {
-        if (!reconnectEnabled || !paired) return
+        if (!reconnectEnabled || !paired || shutdown) return
         val delay = reconnectBackoffMs
-        reconnectBackoffMs = minOf(reconnectBackoffMs * 2, 30_000L)
+        reconnectBackoffMs = minOf(reconnectBackoffMs * 2, 5_000L)
         io.schedule({ connectOnIo() }, delay, TimeUnit.MILLISECONDS)
     }
 
@@ -230,12 +232,24 @@ class RemoteV2Client private constructor(context: Context) {
     }
     @Synchronized fun tune(redirectNumber: Int, fastTune: Boolean) {
         require(redirectNumber in 0..9999) { "Channel number must be 0–9999" }
-        val remote = requireSession()
-        remote.sendKey("HOME"); Thread.sleep(500)
-        remote.sendKey("TV"); Thread.sleep(if (fastTune) 300 else 3000)
-        redirectNumber.toString().forEach { digit -> remote.sendKey("NUM_$digit"); Thread.sleep(150) }
+        sendKey("HOME"); Thread.sleep(500)
+        sendKey("TV"); Thread.sleep(if (fastTune) 300 else 3000)
+        redirectNumber.toString().forEach { digit -> sendKey("NUM_$digit"); Thread.sleep(150) }
     }
-    private fun requireSession(): AurSession = session?.takeIf { it.isReady } ?: throw IllegalStateException("Not connected to the Airtel box")
+    private fun requireSession(): AurSession {
+        var s = session
+        if (s != null && s.isReady) return s
+        if (paired && !shutdown) {
+            connect()
+            val start = System.currentTimeMillis()
+            while (System.currentTimeMillis() - start < 3000) {
+                s = session
+                if (s != null && s.isReady) return s
+                Thread.sleep(100)
+            }
+        }
+        throw IllegalStateException("Not connected to the Airtel box")
+    }
 
     private fun normalizeKey(supplied: String): String {
         var key = supplied.trim().uppercase(Locale.US).replace(Regex("[\\s-]+"), "_")

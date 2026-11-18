@@ -2,8 +2,10 @@ package com.stblab.gui
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Color
 import android.graphics.Canvas
 import android.graphics.Paint
@@ -14,7 +16,10 @@ import android.graphics.Typeface
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.LayerDrawable
+import android.net.ConnectivityManager
+import android.net.Network
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -92,6 +97,9 @@ class MainActivity : Activity() {
         }
     }
 
+    private var screenReceiver: BroadcastReceiver? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         hideSystemChrome()
@@ -101,6 +109,8 @@ class MainActivity : Activity() {
         reloadGenres()
         renderPicker()
         main.postDelayed(poll, 3000)
+        registerScreenReceiver()
+        registerNetworkMonitor()
     }
 
     @Suppress("DEPRECATION")
@@ -123,6 +133,9 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         if (!::remote.isInitialized) return
+        if (remote.paired) {
+            remote.connect()
+        }
         if (renderedPage != page) {
             if (page == "picker") renderPicker() else renderSettings()
         } else {
@@ -130,12 +143,69 @@ class MainActivity : Activity() {
         }
     }
     override fun onDestroy() {
+        unregisterScreenReceiver()
+        unregisterNetworkMonitor()
         activeDiscovery?.stop()
         discoveryExecutor.shutdownNow()
         dialTask?.let(main::removeCallbacks)
         main.removeCallbacksAndMessages(null)
         io.shutdownNow()
         super.onDestroy()
+    }
+
+    private fun registerScreenReceiver() {
+        runCatching {
+            val receiver = object : BroadcastReceiver() {
+                override fun onReceive(context: Context, intent: Intent?) {
+                    when (intent?.action) {
+                        Intent.ACTION_SCREEN_ON, Intent.ACTION_USER_PRESENT -> {
+                            if (::remote.isInitialized && remote.paired) {
+                                main.postDelayed({ remote.connect() }, 1000)
+                            }
+                        }
+                    }
+                }
+            }
+            screenReceiver = receiver
+            val filter = IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_ON)
+                addAction(Intent.ACTION_USER_PRESENT)
+            }
+            androidx.core.content.ContextCompat.registerReceiver(this, receiver, filter, androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED)
+        }
+    }
+
+    private fun unregisterScreenReceiver() {
+        screenReceiver?.let {
+            runCatching { unregisterReceiver(it) }
+        }
+        screenReceiver = null
+    }
+
+    private fun registerNetworkMonitor() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return
+        runCatching {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+            val callback = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    if (::remote.isInitialized && remote.paired) {
+                        main.postDelayed({ remote.connect() }, 1500)
+                    }
+                }
+            }
+            cm.registerDefaultNetworkCallback(callback)
+            networkCallback = callback
+        }
+    }
+
+    private fun unregisterNetworkMonitor() {
+        networkCallback?.let {
+            runCatching {
+                val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                cm?.unregisterNetworkCallback(it)
+            }
+        }
+        networkCallback = null
     }
 
     override fun onBackPressed() {

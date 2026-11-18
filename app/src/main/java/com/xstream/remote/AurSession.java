@@ -158,6 +158,8 @@ final class AurSession {
 
         SSLContext context = buildContext();
         SSLSocket ssl = (SSLSocket) context.getSocketFactory().createSocket();
+        ssl.setKeepAlive(true);
+        ssl.setTcpNoDelay(true);
         ssl.setSoTimeout(8000);
         ssl.connect(new InetSocketAddress(host, port), 8000);
         ssl.setSoTimeout(0);
@@ -231,7 +233,12 @@ final class AurSession {
 
     void sendKey(int code) {
         requireReady();
-        write(Proto.msg(10, Proto.cat(Proto.uint(1, code), Proto.uint(2, DIR_SHORT))));
+        try {
+            write(Proto.msg(10, Proto.cat(Proto.uint(1, code), Proto.uint(2, DIR_SHORT))));
+        } catch (IOException e) {
+            closeQuietly();
+            throw new IllegalStateException("Failed to send key to Airtel box: " + e.getMessage(), e);
+        }
     }
 
     void sendText(String text) {
@@ -252,12 +259,22 @@ final class AurSession {
                 Proto.uint(1, imeCounter),
                 Proto.uint(2, fieldCounter),
                 Proto.msg(3, edit));
-        write(Proto.msg(21, batch));
+        try {
+            write(Proto.msg(21, batch));
+        } catch (IOException e) {
+            closeQuietly();
+            throw new IllegalStateException("Failed to send text to Airtel box: " + e.getMessage(), e);
+        }
     }
 
     void sendAppLink(String uri) {
         requireReady();
-        write(Proto.msg(90, Proto.str(1, uri)));
+        try {
+            write(Proto.msg(90, Proto.str(1, uri)));
+        } catch (IOException e) {
+            closeQuietly();
+            throw new IllegalStateException("Failed to send app link to Airtel box: " + e.getMessage(), e);
+        }
     }
 
     void close() {
@@ -370,7 +387,7 @@ final class AurSession {
         }
     }
 
-    private void onConfigure(byte[] payload) {
+    private void onConfigure(byte[] payload) throws IOException {
         List<Proto.Field> configure = Proto.parse(payload);
         long supported = Proto.number(configure, 1, 0);
         features = (int) (requestedFeatures & supported);
@@ -389,20 +406,17 @@ final class AurSession {
         write(Proto.msg(1, Proto.cat(Proto.uint(1, features), Proto.msg(2, info))));
     }
 
-    private void write(byte[] message) {
+    private void write(byte[] message) throws IOException {
         OutputStream out = output;
         if (out == null) {
-            return;
+            throw new IOException("Output stream is closed");
         }
-        try {
-            synchronized (writeLock) {
-                out.write(Proto.varint(message.length));
-                out.write(message);
-                out.flush();
-            }
-        } catch (IOException e) {
-            closeQuietly();
+        synchronized (writeLock) {
+            out.write(Proto.varint(message.length));
+            out.write(message);
+            out.flush();
         }
+    }
     }
 
     private void closeQuietly() {
